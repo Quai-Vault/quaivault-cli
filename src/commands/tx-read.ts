@@ -1,3 +1,4 @@
+import { keccak256 } from 'quais';
 import type { Affordance, VaultTransaction, TransactionStatus } from '@quaivault/sdk';
 import type { CommandSpec } from '../cli/spec.js';
 import { UsageError, PreconditionError } from '../context/context.js';
@@ -6,13 +7,16 @@ import { span } from '../format/tone.js';
 import { formatAbsolute, formatApproximateAge, formatDuration, safeText } from '../format/index.js';
 import type { Io } from '../render/io.js';
 import {
+  batchOf,
   renderAffordances,
   renderDisclosure,
   statusLabel,
   statusTone,
   txRow,
   txToJson,
+  txUntrustedPointers,
 } from '../render/transaction.js';
+import type { BatchAnalysis } from '../abi/batch.js';
 
 /**
  * Resolve a possibly-abbreviated hash against the vault's transactions.
@@ -67,6 +71,8 @@ interface TxShowData {
   affordances: Affordance[];
   caller?: string;
   chainHead?: number;
+  /** Null when the transaction is not a MultiSend batch. */
+  batch: BatchAnalysis | null;
 }
 
 export const txShowCommand: CommandSpec<{ vault?: string; hash: string }, TxShowData> = {
@@ -96,17 +102,21 @@ export const txShowCommand: CommandSpec<{ vault?: string; hash: string }, TxShow
       if (a.action === 'approve') next.push(`qv tx approve ${address} ${hash.slice(0, 10)}`);
       if (a.action === 'execute') next.push(`qv tx execute ${address} ${hash.slice(0, 10)}`);
     }
+    // Computed once here so `render` and `toJson` cannot disagree about what
+    // is inside a batch, and so the untrusted-pointer list covers every
+    // sub-call summary rather than just the outer one (§8 R7).
+    const batch = batchOf(tx, ctx);
     return {
-      data: { tx, affordances, caller, chainHead: health?.chainHead },
+      data: { tx, affordances, caller, chainHead: health?.chainHead, batch },
       changed: false,
       next: next.length ? next : undefined,
-      untrusted: ['/summary'],
+      untrusted: txUntrustedPointers('', batch),
     };
   },
 
   render(result, io, ctx) {
     const { tx, affordances, caller, chainHead } = result.data;
-    renderDisclosure(tx, io, ctx);
+    renderDisclosure(tx, io, ctx, { batch: result.data.batch });
     io.out('');
     io.out(
       `  Status       ${io.paint(span(statusLabel(tx.status), statusTone(tx.status)))}`,
@@ -130,7 +140,7 @@ export const txShowCommand: CommandSpec<{ vault?: string; hash: string }, TxShow
 
   toJson(result) {
     return {
-      ...txToJson(result.data.tx, result.data.chainHead),
+      ...txToJson(result.data.tx, result.data.chainHead, result.data.batch),
       caller: result.data.caller ?? null,
       affordances: result.data.affordances.map((a) => ({
         action: a.action,
@@ -139,13 +149,23 @@ export const txShowCommand: CommandSpec<{ vault?: string; hash: string }, TxShow
         availableAt: a.availableAt ?? null,
         blockedBy: a.blockedBy ?? null,
       })),
-      // Bind an agent to the bytes, not to any interpretation of them.
+      // Bind an agent to the bytes, not to any interpretation of them
+      // (§3.4). Every field here has a matching --expect-* flag on the write
+      // commands, and `dataHash` is the one that actually closes R7: prose can
+      // be attacker-authored, a keccak of the calldata cannot.
       verify: {
         to: result.data.tx.to,
         value: result.data.tx.value.toString(10),
+        operation: 'call',
         selector: result.data.tx.data.slice(0, 10),
-        dataHash: null,
+        dataHash: keccak256(result.data.tx.data === '0x' ? '0x' : result.data.tx.data),
         abiSource: result.data.tx.abiSource,
+        // A batch's real provenance is its weakest sub-call, and its real
+        // danger is an inner delegatecall. Both are invisible in the fields
+        // above, which describe only the outer multiSend.
+        batchHasDelegatecall: result.data.batch?.hasDelegatecall ?? false,
+        batchAbiSource: result.data.batch?.abiSource ?? null,
+        batchUnreadable: result.data.batch?.error ?? null,
       },
     };
   },
@@ -161,6 +181,16 @@ export const txShowCommand: CommandSpec<{ vault?: string; hash: string }, TxShow
       abiSource: { enum: ['builtin', 'heuristic', 'supplied', 'none'] },
       status: { type: 'string' },
       affordances: { type: 'array' },
+      batch: {
+        type: ['object', 'null'],
+        description:
+          'Present when the calldata is a MultiSend batch. `calls[]` carries every ' +
+          'sub-call verbatim. `hasDelegatecall` is the only delegatecall signal that ' +
+          'exists — the vault transaction struct has no operation field, so a ' +
+          'top-level transaction is always a call. `unreadable` is non-null when the ' +
+          'payload could not be accounted for byte-exactly, in which case treat the ' +
+          'batch as hostile.',
+      },
       verify: { type: 'object', description: 'assert against these with --expect-* on writes' },
     },
   },

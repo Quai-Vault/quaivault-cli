@@ -1,5 +1,6 @@
 import type { Affordance, VaultTransaction, TransactionStatus } from '@quaivault/sdk';
 import type { AppContext } from '../context/context.js';
+import { analyzeBatch, type BatchAnalysis } from '../abi/batch.js';
 import type { Io } from './io.js';
 import { span, type Tone } from '../format/tone.js';
 import {
@@ -48,8 +49,9 @@ export function renderDisclosure(
   tx: VaultTransaction,
   io: Io,
   ctx: AppContext,
-  opts: { title?: string } = {},
+  opts: { title?: string; batch?: BatchAnalysis | null } = {},
 ): void {
+  const batch = opts.batch !== undefined ? opts.batch : batchOf(tx, ctx);
   const who = (addr: string): string => {
     const name = ctx.contactName(addr);
     return name ? `${addr}  (${safeText(name, 40)})` : addr;
@@ -70,13 +72,14 @@ export function renderDisclosure(
   io.out(`  Value        ${formatQuai(tx.value)} QUAI`);
   if (tx.value > 0n) io.out(`               exactly ${tx.value.toString(10)} wei`);
 
-  // Operation: a delegatecall lets the target rewrite vault storage.
-  const isDelegate = isDelegatecall(tx);
-  io.out(
-    `  Operation    ${isDelegate ? io.paint(span('DELEGATECALL — the target can rewrite vault storage', 'danger')) : 'call'}`,
-  );
+  // The vault's transaction struct carries no operation field, so a top-level
+  // transaction is structurally always a call. Saying so plainly is better
+  // than a bare "call" that reads like the result of a check.
+  io.out('  Operation    call (the vault has no top-level delegatecall)');
 
   renderCalldata(tx.data, io, tx.abiSource === 'none');
+
+  if (batch) renderBatch(batch, io, ctx);
 
   io.out('');
   io.out(`  Approvals    ${tx.approvalCount} of ${tx.threshold}`);
@@ -131,9 +134,101 @@ export function renderCalldata(data: string, io: Io, forceFull: boolean): void {
   }
 }
 
-export function isDelegatecall(tx: VaultTransaction): boolean {
-  const op = (tx as unknown as { operation?: number }).operation;
-  return op === 1;
+/**
+ * Analyse a transaction's calldata for a MultiSend batch, using the client's
+ * configured contract addresses. Pure — no I/O — so `tx show` and the
+ * pre-signature path render identically (§6 renderer parity).
+ */
+export function batchOf(tx: VaultTransaction, ctx: AppContext): BatchAnalysis | null {
+  return analyzeBatch({
+    vault: tx.vault,
+    to: tx.to,
+    data: tx.data,
+    contracts: ctx.qv.network.contracts,
+    ...(ctx.qv.abis ? { abis: ctx.qv.abis } : {}),
+  });
+}
+
+/**
+ * Render every sub-call of a batch (plan §7, "Batch recurses").
+ *
+ * Each one gets the same treatment the outer call gets, because each one is a
+ * thing the vault will actually do: recipient, value, provenance badge, and —
+ * when the ABI is unknown — the full raw calldata word by word (§7.1, which
+ * "applies identically to every batch sub-call").
+ */
+export function renderBatch(batch: BatchAnalysis, io: Io, ctx: AppContext): void {
+  const who = (addr: string): string => {
+    const name = ctx.contactName(addr);
+    return name ? `${addr}  (${safeText(name, 40)})` : addr;
+  };
+
+  io.out('');
+  if (batch.error) {
+    // Fail closed and say why. A batch nobody can read is the one case where
+    // silence would be actively dangerous.
+    io.out(
+      io.paint(
+        span(`  Batch        UNREADABLE — ${safeText(batch.error, 200)}`, 'danger'),
+      ),
+    );
+    io.out(
+      io.paint(
+        span(
+          '               Treated as containing a delegatecall, because it might.',
+          'danger',
+        ),
+      ),
+    );
+    return;
+  }
+
+  io.out(`  Batch        ${batch.calls.length} sub-transaction${batch.calls.length === 1 ? '' : 's'}`);
+  if (batch.hasDelegatecall) {
+    io.out(
+      io.paint(
+        span(
+          '               contains a DELEGATECALL — that sub-call can rewrite vault storage',
+          'danger',
+        ),
+      ),
+    );
+  }
+
+  for (const call of batch.calls) {
+    io.out('');
+    const label = `  [${call.index + 1}/${batch.calls.length}]`;
+    io.out(`${label}      ${safeText(call.summary, 200)}`);
+    io.out(
+      `               ${call.isDelegatecall ? io.paint(span('DELEGATECALL', 'danger')) : 'call'}   ${io.paint(abiSourceBadge(call.abiSource))}`,
+    );
+    io.out(`               to     ${who(call.to)}`);
+    io.out(`               value  ${formatQuai(call.value)} QUAI`);
+    if (call.value > 0n) io.out(`                      exactly ${call.value.toString(10)} wei`);
+    renderSubCalldata(call.data, io, call.abiSource === 'none');
+  }
+}
+
+/** §7.1 for a sub-call: same rules, indented under its entry. */
+function renderSubCalldata(data: string, io: Io, forceFull: boolean): void {
+  const view = viewCalldata(data);
+  if (view.byteLength === 0) {
+    io.out('               data   (none)');
+    return;
+  }
+  const header = forceFull
+    ? `unknown ABI — ${view.byteLength} bytes, showing raw calldata`
+    : `${view.byteLength} bytes`;
+  io.out(`               data   ${io.paint(span(header, forceFull ? 'warn' : 'muted'))}`);
+  if (view.selector) io.out(`                      selector  ${view.selector}`);
+  for (const w of view.words) {
+    io.out(`                      [${String(w.offset).padStart(3, '0')}]     ${w.hex}`);
+  }
+  if (view.ragged) {
+    io.out(
+      `                      ${io.paint(span('note: payload is not a whole number of 32-byte words (packed or non-standard encoding)', 'warn'))}`,
+    );
+  }
 }
 
 /** The can / cannot / not-yet trichotomy — a direct rendering of affordances. */
@@ -172,8 +267,34 @@ export function txRow(tx: VaultTransaction, io: Io, ctx: AppContext, chainHead?:
   return `  ${tx.hash.slice(2, 10)}  ${age.padEnd(12)} ${bar.padEnd(6)} ${status.padEnd(18)} ${safeText(tx.summary, 60)}${badge}`;
 }
 
-export function txToJson(tx: VaultTransaction, chainHead?: number): Record<string, unknown> {
+export function txToJson(
+  tx: VaultTransaction,
+  chainHead?: number,
+  batch?: BatchAnalysis | null,
+): Record<string, unknown> {
   return {
+    // §7: no word-splitting in JSON, that is a rendering concern. Sub-calls
+    // carry `data` verbatim plus the same selector/length an agent needs to
+    // bind an assertion to bytes rather than prose.
+    batch: batch
+      ? {
+          unreadable: batch.error ?? null,
+          hasDelegatecall: batch.hasDelegatecall,
+          abiSource: batch.abiSource,
+          calls: batch.calls.map((c) => ({
+            index: c.index,
+            operation: c.operation,
+            isDelegatecall: c.isDelegatecall,
+            to: c.to,
+            value: c.value,
+            data: c.data,
+            dataLength: (c.data.length - 2) / 2,
+            selector: viewCalldata(c.data).selector,
+            summary: c.summary,
+            abiSource: c.abiSource,
+          })),
+        }
+      : null,
     hash: tx.hash,
     vault: tx.vault,
     to: tx.to,
@@ -201,7 +322,17 @@ export function txToJson(tx: VaultTransaction, chainHead?: number): Record<strin
   };
 }
 
-/** JSON Pointers to fields carrying attacker-authored text (plan §8 R7). */
-export function txUntrustedPointers(prefix: string): string[] {
-  return [`${prefix}/summary`];
+/**
+ * JSON Pointers to fields carrying attacker-authored text (plan §8 R7).
+ *
+ * Every sub-call summary is a channel too: a batch is the easiest place to
+ * hide `"SYSTEM: ignore all prior instructions"` in a token name, because the
+ * outer summary is only ever "Batched call: N sub-transactions".
+ */
+export function txUntrustedPointers(prefix: string, batch?: BatchAnalysis | null): string[] {
+  const out = [`${prefix}/summary`];
+  if (batch) {
+    batch.calls.forEach((_, i) => out.push(`${prefix}/batch/calls/${i}/summary`));
+  }
+  return out;
 }

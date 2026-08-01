@@ -8,6 +8,7 @@ import {
   ZERO_ADDRESS,
   DEFAULT_TEXT_LIMIT,
   executableAfterOf,
+  decodeMultiSendPayload,
   classifyExecution,
   sanitizeText,
   isTerminal,
@@ -230,6 +231,34 @@ describe('§7 / Appendix A — one effective-delay formula, and it is not additi
     // 30-day contract maximum. Any expiration validation in the CLI reads
     // this constant rather than hardcoding a number.
     expect(MAX_EXECUTION_DELAY).toBe(30 * 24 * 60 * 60);
+  });
+});
+
+describe('§7 — decodeMultiSendPayload is lenient, so src/abi/batch.ts must not be', () => {
+  const ALICE = '0072a1b2c3d4e5f60718293a4b5c6d7e8f901234';
+  const validEntry = '00' + ALICE + '0'.repeat(64) + '0'.repeat(64);
+
+  it('silently drops a truncated entry instead of throwing', () => {
+    // Verified against 0.6.0. This is why the CLI accounts for the payload
+    // byte-exactly rather than trusting the returned array: a disclosure
+    // showing N sub-calls for a blob the chain reads differently is the
+    // blind-signing failure mode with extra steps.
+    expect(decodeMultiSendPayload(`0x${validEntry.slice(0, 40)}`)).toEqual([]);
+  });
+
+  it('silently drops trailing bytes after a valid entry', () => {
+    // The nastiest case: the decode *succeeds* and returns one good entry.
+    const decoded = decodeMultiSendPayload(`0x${validEntry}abcd`);
+    expect(decoded).toHaveLength(1);
+    // 85 bytes consumed, 87 supplied. Nothing in the SDK's return value says so.
+    expect(decoded.reduce((n, e) => n + 85 + (e.data.length - 2) / 2, 0)).toBe(85);
+  });
+
+  it('would be a welcome fix, and this test is how we would notice', () => {
+    // If a future SDK throws or reports a remainder here, our fail-closed
+    // wrapper becomes belt-and-braces rather than load-bearing — worth
+    // knowing, and worth filing (§1.0: finding SDK defects is expected work).
+    expect(() => decodeMultiSendPayload(`0x${validEntry}abcd`)).not.toThrow();
   });
 });
 

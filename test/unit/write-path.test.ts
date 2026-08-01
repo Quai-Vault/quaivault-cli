@@ -9,7 +9,16 @@ import {
   txExecuteCommand,
   outcomeExit,
 } from '../../src/commands/tx-write.js';
-import { ADDR, createFakeClient, createFakeContext, fakeTx } from '../fake-client.js';
+import {
+  ADDR,
+  batchOfBuiltins,
+  batchOfTwo,
+  batchWithDelegatecall,
+  createFakeClient,
+  createFakeContext,
+  fakeTx,
+  unreadableBatch,
+} from '../fake-client.js';
 
 /** Assert against message + remediation: the actionable half is the remediation. */
 async function rejectsWith(p: Promise<unknown>, re: RegExp): Promise<void> {
@@ -251,5 +260,71 @@ describe('dry run', () => {
     expect(planned.dataHash).toBeTruthy();
     // plan() is a pure read: it returns a disclosure and touches no signer.
     expect(ctx.io.stdout).toHaveLength(0);
+  });
+});
+
+describe('the batch gate — the only delegatecall detection that exists', () => {
+  // The vault's transaction struct has no operation field, so a top-level
+  // vault transaction is structurally always a CALL. Every one of these goes
+  // through the MultiSend payload, because that is the only place an
+  // operation byte lives (plan §7, src/abi/batch.ts).
+
+  it('refuses an inner delegatecall non-interactively, even under a permissive policy', async () => {
+    const tx = fakeTx({ data: batchWithDelegatecall(), kind: 'batched_call' });
+    const ctx = ctxWith(tx, { policy: permissivePolicy, flags: { yes: true } });
+    await rejectsWith(
+      txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort),
+      /deny_delegatecall/,
+    );
+  });
+
+  it('refuses a batch whose payload cannot be accounted for', async () => {
+    // Fail closed: bytes we cannot read might be a delegatecall, and a
+    // disclosure that showed one sub-call for a blob the chain reads
+    // differently would be worse than no disclosure at all.
+    const tx = fakeTx({ data: unreadableBatch(), kind: 'batched_call' });
+    const ctx = ctxWith(tx, { policy: permissivePolicy, flags: { yes: true } });
+    await rejectsWith(
+      txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort),
+      /deny_delegatecall|require_abi_source/,
+    );
+  });
+
+  it('does not let a builtin outer decode launder weak sub-calls', async () => {
+    // `multiSend(bytes)` always decodes builtin, so before recursion this
+    // satisfied `require_abi_source = ["builtin"]` no matter what was inside.
+    // An ERC-20 transfer is the realistic version: it decodes `heuristic`,
+    // because the SDK is matching a selector against an address it cannot
+    // confirm is a token at all.
+    const tx = fakeTx({ data: batchOfTwo(), kind: 'batched_call', abiSource: 'builtin' });
+    const ctx = ctxWith(tx, { policy: permissivePolicy, flags: { yes: true } });
+    await rejectsWith(
+      txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort),
+      /require_abi_source/,
+    );
+  });
+
+  it('allows a batch whose every sub-call the SDK vouches for', async () => {
+    const tx = fakeTx({ data: batchOfBuiltins(), kind: 'batched_call', abiSource: 'builtin' });
+    const ctx = ctxWith(tx, { policy: permissivePolicy, flags: { yes: true } });
+    const planned = await txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort);
+    expect(planned.disclosure.unverified).toBe(false);
+  });
+
+  it('marks a delegatecall batch unverified so the second flag is required', async () => {
+    // §7's --yes gate is mechanical: an inner delegatecall trips it even
+    // though the outer operation is 0 — which it always is.
+    const tx = fakeTx({ data: batchWithDelegatecall(), kind: 'batched_call' });
+    const ctx = ctxWith(tx, { policy: null, flags: { yes: true } });
+    const planned = await txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort);
+    expect(planned.disclosure.unverified).toBe(true);
+  });
+
+  it('leaves a plain non-batch call alone', async () => {
+    const tx = fakeTx({ abiSource: 'builtin' });
+    const ctx = ctxWith(tx, { policy: permissivePolicy, flags: { yes: true } });
+    const planned = await txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort);
+    expect(planned.disclosure.unverified).toBe(false);
+    expect(planned.disclosure.batch).toBeNull();
   });
 });

@@ -1,3 +1,4 @@
+import { mainnet, interfaces } from '@quaivault/sdk';
 import type {
   Affordance,
   IndexerHealth,
@@ -164,6 +165,12 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
       forOwner: () => Promise.resolve(opts.forOwner ?? []),
       forGuardian: () => Promise.resolve(opts.forGuardian ?? []),
     },
+    // The real mainnet config rather than invented addresses: the batch
+    // analysis keys `socialRecovery` and `multiSendCallOnly` off these when
+    // it decodes sub-calls, so a hand-written stub here would exercise a
+    // decode path no user ever hits.
+    network: mainnet,
+    abis: undefined,
     now: () => Math.floor(Date.now() / 1000),
   } as unknown as QuaiVaultClient;
 }
@@ -231,4 +238,80 @@ export function createFakeContext(opts: FakeContextOptions = {}): AppContext & {
         address: opts.identity ?? ADDR.bob,
       }),
   };
+}
+
+// --------------------------------------------------------------- batch fixtures
+
+/**
+ * MultiSend payload builders (plan §7).
+ *
+ * Hand-packed to the wire layout — `operation(1) ‖ to(20) ‖ value(32) ‖
+ * dataLength(32) ‖ data` — rather than built with `encodeMultiSendPayload`,
+ * because the SDK's encoder always writes operation 0. MultiSendCallOnly
+ * rejects nested delegatecall, so the encoder cannot produce the input the
+ * delegatecall gate exists to catch. An attacker-authored proposal is under no
+ * such constraint.
+ */
+export function multiSendEntry(
+  operation: number,
+  to: string,
+  value: bigint,
+  data: string,
+): string {
+  const body = data.replace(/^0x/, '');
+  return (
+    operation.toString(16).padStart(2, '0') +
+    to.replace(/^0x/, '').toLowerCase() +
+    value.toString(16).padStart(64, '0') +
+    (body.length / 2).toString(16).padStart(64, '0') +
+    body
+  );
+}
+
+export function multiSendCalldata(payload: string): string {
+  return interfaces.multiSend.encodeFunctionData('multiSend', [payload]);
+}
+
+export function batchOf(...entries: string[]): string {
+  return multiSendCalldata('0x' + entries.join(''));
+}
+
+export const erc20Transfer = (to: string, amount: bigint): string =>
+  interfaces.erc20.encodeFunctionData('transfer', [to, amount]);
+
+/** Two ordinary calls: what a well-formed treasury batch looks like. */
+export function batchOfTwo(): string {
+  return batchOf(
+    multiSendEntry(0, ADDR.carol, 1_000_000_000_000_000_000n, '0x'),
+    multiSendEntry(0, ADDR.token, 0n, erc20Transfer(ADDR.bob, 42n)),
+  );
+}
+
+/** A delegatecall hidden behind two innocuous calls. */
+export function batchWithDelegatecall(): string {
+  return batchOf(
+    multiSendEntry(0, ADDR.carol, 1n, '0x'),
+    multiSendEntry(0, ADDR.token, 0n, erc20Transfer(ADDR.bob, 1n)),
+    multiSendEntry(1, ADDR.alice, 0n, '0xdeadbeef'),
+  );
+}
+
+/** A valid entry with bytes trailing it that the SDK's decoder discards. */
+export function unreadableBatch(): string {
+  return multiSendCalldata('0x' + multiSendEntry(0, ADDR.carol, 0n, '0x') + 'abcd');
+}
+
+/**
+ * A batch every sub-call of which the SDK genuinely vouches for.
+ *
+ * Native transfers only. An ERC-20 `transfer` decodes as `heuristic`, not
+ * `builtin` — the SDK is matching a 4-byte selector against an address it
+ * cannot confirm is a token contract at all — so a batch containing one is
+ * correctly refused by `require_abi_source = ["builtin"]`.
+ */
+export function batchOfBuiltins(): string {
+  return batchOf(
+    multiSendEntry(0, ADDR.carol, 1_000_000_000_000_000_000n, '0x'),
+    multiSendEntry(0, ADDR.bob, 2_000_000_000_000_000_000n, '0x'),
+  );
 }

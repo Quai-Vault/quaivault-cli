@@ -187,7 +187,6 @@ const STRUCTURAL_TYPES = new Set([
   'VaultContext',
   'VaultView',
   'WatchOptions',
-  'Operation',
 ]);
 
 /**
@@ -213,8 +212,6 @@ const NOT_APPLICABLE: Record<string, string> = {
   MAX_MODULES:
     'The module allowlist (Phase 5) validates against the vault’s live module set rather than the static cap.',
   ZERO_ADDRESS: 'Address validity is decided by inspectAddress, which subsumes the zero case.',
-  decodeMultiSendPayload: 'Used by the §7 batch disclosure — see KNOWN_GAPS below.',
-  decodeCall: 'Used by the §7 batch disclosure — see KNOWN_GAPS below.',
   minimumExpiration: 'Should replace the local floor computation — see KNOWN_GAPS below.',
 };
 

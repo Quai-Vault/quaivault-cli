@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { createBufferIo } from '../../src/render/io.js';
 import { renderCalldata, renderDisclosure, txToJson } from '../../src/render/transaction.js';
-import { ADDR, createFakeContext, fakeTx } from '../fake-client.js';
+import {
+  ADDR,
+  batchOfTwo,
+  batchWithDelegatecall,
+  createFakeContext,
+  fakeTx,
+  unreadableBatch,
+} from '../fake-client.js';
 import { jsonSafe } from '../../src/util/json.js';
 
 const io = () => createBufferIo(100);
@@ -82,11 +89,41 @@ describe('pre-signature disclosure', () => {
     expect(text).toContain('alice');
   });
 
-  it('flags a delegatecall in the strongest terms available', () => {
+  it('flags a delegatecall inside a batch in the strongest terms available', () => {
+    // This test used to pass a synthetic `operation: 1` on the transaction
+    // itself, which no VaultTransaction has ever carried -- the vault's
+    // struct has no operation field. It was asserting against a shape the
+    // renderer invented, and it went green while the real delegatecall gate
+    // never fired. The only place an operation byte exists is a MultiSend
+    // sub-call, so that is what this builds.
     const ctx = createFakeContext();
     const b = io();
-    renderDisclosure({ ...fakeTx(), operation: 1 } as never, b, ctx);
-    expect(b.stdout.join('\n')).toContain('DELEGATECALL');
+    renderDisclosure(fakeTx({ data: batchWithDelegatecall(), kind: 'batched_call' }), b, ctx);
+    const text = b.stdout.join('\n');
+    expect(text).toContain('DELEGATECALL');
+    expect(text).toMatch(/rewrite vault storage/);
+  });
+
+  it('renders every sub-call of a batch, not just the count', () => {
+    // §7 "Batch recurses". Without this a reviewer sees "Batched call: N
+    // sub-transactions" and approves N things they were never shown.
+    const ctx = createFakeContext();
+    const b = io();
+    renderDisclosure(fakeTx({ data: batchOfTwo(), kind: 'batched_call' }), b, ctx);
+    const text = b.stdout.join('\n');
+    expect(text).toContain('2 sub-transactions');
+    expect(text).toContain('[1/2]');
+    expect(text).toContain('[2/2]');
+    expect(text.toLowerCase()).toContain(ADDR.carol.toLowerCase());
+  });
+
+  it('says so loudly when a batch payload cannot be read', () => {
+    const ctx = createFakeContext();
+    const b = io();
+    renderDisclosure(fakeTx({ data: unreadableBatch(), kind: 'batched_call' }), b, ctx);
+    const text = b.stdout.join('\n');
+    expect(text).toContain('UNREADABLE');
+    expect(text).toMatch(/Treated as containing a delegatecall/);
   });
 });
 

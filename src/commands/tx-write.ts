@@ -1,5 +1,5 @@
 import { keccak256 } from 'quais';
-import type { ExecuteOutcome, ExecuteResult, VaultTransaction } from '@quaivault/sdk';
+import type { AbiSource, ExecuteOutcome, ExecuteResult, VaultTransaction } from '@quaivault/sdk';
 import type { CommandSpec, WritePlan } from '../cli/spec.js';
 import { ExitCode, type ExitCodeValue } from '../cli/exit.js';
 import { PreconditionError, type AppContext } from '../context/context.js';
@@ -7,7 +7,8 @@ import { checkPolicy } from '../context/policy.js';
 import { span } from '../format/tone.js';
 import { formatAbsolute, formatDuration, safeText } from '../format/index.js';
 import type { Io } from '../render/io.js';
-import { isDelegatecall, renderDisclosure } from '../render/transaction.js';
+import { batchOf, renderDisclosure } from '../render/transaction.js';
+import { isUnverified, type BatchAnalysis } from '../abi/batch.js';
 import { resolveTxHash } from './tx-read.js';
 
 interface LifecycleInput {
@@ -25,6 +26,8 @@ interface Disclosure {
   address: string;
   action: string;
   unverified: boolean;
+  /** Null when the transaction is not a batch. */
+  batch: BatchAnalysis | null;
 }
 
 const EXPECT_OPTIONS = [
@@ -60,7 +63,11 @@ async function planLifecycle(
   // by construction, so it binds to the bytes instead (plan §3.4).
   assertExpectations(tx, input);
 
-  const unverified = tx.abiSource !== 'builtin' || isDelegatecall(tx);
+  // The batch analysis is what makes the delegatecall gate real: the vault's
+  // transaction struct has no operation field, so a delegatecall can only
+  // ever be a MultiSend sub-call (§7, src/abi/batch.ts).
+  const batch = batchOf(tx, ctx);
+  const unverified = isUnverified(tx.abiSource, batch);
 
   // Policy applies to non-interactive signing only; an attended human is bound
   // by the disclosure and the prompt, not by a file.
@@ -69,8 +76,8 @@ async function planLifecycle(
       value: tx.value,
       to: tx.to,
       kind: tx.kind,
-      isDelegatecall: isDelegatecall(tx),
-      abiSource: tx.abiSource,
+      isDelegatecall: batch?.hasDelegatecall ?? false,
+      abiSource: batch ? worstOf(tx.abiSource, batch.abiSource) : tx.abiSource,
       approvalsLastHour: 0,
     });
     if (violations.length) {
@@ -82,11 +89,21 @@ async function planLifecycle(
   }
 
   return {
-    disclosure: { tx, address, action, unverified },
+    disclosure: { tx, address, action, unverified, batch },
     dataHash: keccak256(tx.data === '0x' ? '0x' : tx.data),
     summary: `${action} ${safeText(tx.summary, 120)}`,
     unverified,
   };
+}
+
+/**
+ * The weaker of two provenances, so `require_abi_source = ["builtin"]` cannot
+ * be satisfied by an outer `multiSend` that the SDK vouches for while the
+ * sub-calls inside it are guesses.
+ */
+function worstOf(outer: AbiSource, inner: AbiSource): AbiSource {
+  const order: AbiSource[] = ['builtin', 'supplied', 'heuristic', 'none'];
+  return order.indexOf(inner) > order.indexOf(outer) ? inner : outer;
 }
 
 function assertExpectations(tx: VaultTransaction, input: LifecycleInput): void {
@@ -115,13 +132,15 @@ function assertExpectations(tx: VaultTransaction, input: LifecycleInput): void {
 
 function renderPlanned(planned: WritePlan<Disclosure>, io: Io, ctx: AppContext): void {
   const d = planned.disclosure;
-  renderDisclosure(d.tx, io, ctx, { title: `About to ${d.action}:` });
+  renderDisclosure(d.tx, io, ctx, { title: `About to ${d.action}:`, batch: d.batch });
   if (d.unverified) {
     io.out('');
     io.out(
       io.paint(
         span(
-          '  This decode is not one the SDK vouches for, or it is a delegatecall.',
+          d.batch?.hasDelegatecall
+            ? '  This batch contains a delegatecall — a sub-call can rewrite vault storage.'
+            : '  This decode is not one the SDK vouches for.',
           'danger',
         ),
       ),
