@@ -23,6 +23,10 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm run lint
+      # Build before testing so test/unit/bundle.test.ts actually runs: it
+      # asserts ink stays out of the one-shot path, which is only observable
+      # in dist/ and skips itself when dist/ is absent.
+      - run: npm run build
       - run: npm test
       # Exactly one copy of quais, and within the SDK's declared peer range.
       # `--legacy-peer-deps` can bypass the allowlist silently.

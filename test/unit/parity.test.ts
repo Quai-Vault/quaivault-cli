@@ -120,7 +120,7 @@ describe('no surface reimplements formatting', () => {
       for (const entry of readdirSync(d)) {
         const p = join(d, entry);
         if (statSync(p).isDirectory()) walk(p);
-        else if (p.endsWith('.ts')) out.push({ path: p, text: readFileSync(p, 'utf8') });
+        else if (/\.tsx?$/.test(p)) out.push({ path: p, text: readFileSync(p, 'utf8') });
       }
     };
     walk(dir);

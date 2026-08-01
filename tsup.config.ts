@@ -12,6 +12,12 @@ export default defineConfig({
   target: 'node22',
   platform: 'node',
   clean: true,
+  // Code splitting is what keeps ink off the one-shot path. `qv tui` reaches
+  // its ink app through a dynamic import; without splitting, esbuild inlines
+  // that module and hoists its `import 'ink'` to the top of the bundle, so
+  // every `qv inbox` would pay ~420ms to load React for a UI it never draws.
+  // There is a startup test asserting this stays true.
+  splitting: true,
   sourcemap: true,
   dts: false,
   // Every runtime dependency stays external. Bundling `quais` would defeat the

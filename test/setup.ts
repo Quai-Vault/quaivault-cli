@@ -18,7 +18,27 @@ const boom = (what: string) => () => {
   throw new Error(`Network access from a unit test: ${what}. Use the typed fake client.`);
 };
 
-globalThis.fetch = boom('fetch');
+/**
+ * `data:` is not the network.
+ *
+ * Ink's layout engine is `yoga-layout`, which loads its WebAssembly from a
+ * base64 `data:` URI via `fetch`. Blocking that would block the TUI smoke
+ * tests for no safety gain: a data URI carries its own bytes and reaches
+ * nothing. Everything with a host still throws.
+ */
+const realFetch: typeof fetch = globalThis.fetch;
+globalThis.fetch = (input, init) => {
+  // `input` is string | URL | Request; only the first two can be a data URI.
+  const url =
+    typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+  if (url.startsWith('data:')) return realFetch(input, init);
+  return boom(`fetch ${url.slice(0, 60)}`)();
+};
+
 (globalThis as Record<string, unknown>).WebSocket = boom('WebSocket');
 
 net.connect = boom('net.connect');

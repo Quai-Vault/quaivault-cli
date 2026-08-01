@@ -10,6 +10,14 @@ version is `0.x`, minor bumps may contain breaking changes.
 
 ### Added
 
+- **A multi-pane TUI on `ink`** — inbox, history, activity, vault, recovery
+  and a proposal form, with tab cycling, real resize handling and width-aware
+  layout. It still holds no key: every action spawns a one-shot `qv …` child
+  that reads its own password and shows its own pre-signature disclosure.
+  Ink is behind a dynamic import so `qv inbox` never loads React.
+- **A proposal form** that builds *arguments*, never calldata. The child
+  re-reads chain state and renders the §7 disclosure before anything is
+  signed, so the form cannot produce a signature over bytes nobody saw.
 - **Batch disclosure recursion** (§7). Every sub-call of a MultiSend batch is
   now disclosed with its own recipient, value, decode provenance and — when
   the ABI is unknown — full raw calldata. `--json` carries the same data, and
@@ -46,6 +54,12 @@ version is `0.x`, minor bumps may contain breaking changes.
   error message already told users to leave.
 - `qv tx approve` and `qv propose *` now report indexer lag after a successful
   write instead of swallowing it, matching `qv tx execute`.
+- **The TUI now handles terminal resize.** The reducer has always had a
+  `resize` event and nothing ever emitted it, so the viewport was fixed at
+  whatever the terminal was on launch.
+- **The spawned signer's output is no longer hidden.** stdout was piped while
+  stdin was inherited, so the child's disclosure and its confirmation prompt
+  were invisible while it waited for an answer.
 
 ## [0.1.0]
 

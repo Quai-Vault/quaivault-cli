@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
 
 /**
- * Sign by delegating to a one-shot invocation of ourselves.
+ * Act by delegating to a one-shot invocation of ourselves (plan §4.4).
  *
- * The TUI never loads a keystore. On confirm it leaves the alternate screen and
- * spawns `process.execPath` with the one-shot argv; **the child reads the
+ * The TUI never loads a keystore. On an action it unmounts Ink, hands the
+ * terminal to `process.execPath` with one-shot argv, and **the child reads the
  * password itself from /dev/tty**. The TUI must never broker the password —
  * piping it in would put the key's precursor back in this address space and
  * defeat the whole design.
@@ -14,36 +14,60 @@ import { spawn } from 'node:child_process';
  * authentication — a full heap read. Against a one-shot process that is a
  * ~50 ms race; against a TUI sitting unlocked it is a certainty. `tmux detach`
  * also sends no signal at all, so idle/suspend locking mostly never fires.
+ *
+ * **All three streams are inherited, deliberately.** §4.4 sketched spawning
+ * with `--json` and parsing the result, but that hides the child's output —
+ * and the child's output is the §7 pre-signature disclosure and its
+ * confirmation prompt. Piping stdout while inheriting stdin produces the worst
+ * possible state: the child asks a question the user cannot see and waits for
+ * an answer to it. Inheriting everything means the reviewer sees exactly what
+ * a one-shot user sees, which is the strongest parity guarantee available, and
+ * costs only the structured result — which the exit code already carries.
  */
-export interface SignOutcome {
+export interface SpawnOutcome {
   ok: boolean;
   exitCode: number;
-  stdout: string;
-  stderr: string;
+  message: string;
 }
 
-export async function spawnSigner(argv: string[]): Promise<SignOutcome> {
+/** The one-shot exit codes, read back into something worth showing. */
+function describe(code: number): { ok: boolean; message: string } {
+  switch (code) {
+    case 0:
+      return { ok: true, message: 'done' };
+    case 2:
+      return { ok: false, message: 'usage error' };
+    case 3:
+      return { ok: false, message: 'refused: precondition or policy' };
+    case 4:
+      return { ok: false, message: 'not executed — approved, or timelock started' };
+    case 5:
+      return { ok: false, message: 'declined' };
+    case 130:
+      return { ok: false, message: 'interrupted' };
+    default:
+      return { ok: false, message: `failed (exit ${code})` };
+  }
+}
+
+export async function spawnSigner(argv: string[]): Promise<SpawnOutcome> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [process.argv[1] as string, ...argv], {
-      // stdin inherited so the child can reach the terminal for its own
-      // password prompt; we never write to it.
-      stdio: ['inherit', 'pipe', 'pipe'],
+      // The child owns the terminal outright while it runs.
+      stdio: 'inherit',
       env: {
         ...process.env,
         // Belt and braces: a spawned signer must not inherit a plaintext key
-        // from our environment.
+        // from our environment (§3.5).
         QUAIVAULT_PRIVATE_KEY: undefined,
       },
     });
-    let stdout = '';
-    let stderr = '';
-    child.stdout?.on('data', (c: Buffer) => (stdout += c.toString()));
-    child.stderr?.on('data', (c: Buffer) => (stderr += c.toString()));
     child.on('close', (code) => {
-      resolve({ ok: code === 0, exitCode: code ?? 1, stdout, stderr });
+      const exitCode = code ?? 1;
+      resolve({ exitCode, ...describe(exitCode) });
     });
     child.on('error', (err) => {
-      resolve({ ok: false, exitCode: 1, stdout: '', stderr: err.message });
+      resolve({ ok: false, exitCode: 1, message: err.message });
     });
   });
 }

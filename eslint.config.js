@@ -53,7 +53,7 @@ export default tseslint.config(
     // would let the TUI reach the chain directly, and then "signs by
     // delegation" becomes something you have to check by reading rather
     // than something the build enforces.
-    files: ['src/tui/**/*.ts'],
+    files: ['src/tui/**/*.ts', 'src/tui/**/*.tsx'],
     rules: {
       '@typescript-eslint/no-restricted-imports': [
         'error',
@@ -83,6 +83,12 @@ export default tseslint.config(
               group: ['**/keys/*', '../keys/*'],
               message:
                 'The TUI holds no key. kill -USR1 on a long-lived process is a full heap read, which is the entire reason for the spawned-signer design (§4.4).',
+            },
+            {
+              group: ['**/abi/*', '../abi/*'],
+              allowTypeImports: true,
+              message:
+                'tui/ projects data; it does not decode calldata. Compute the batch analysis in commands/ and hand it in, so a component cannot re-derive what a reviewer is about to sign. Type-only imports are fine.',
             },
           ],
         },
