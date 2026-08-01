@@ -2,6 +2,7 @@ name: CI
 on:
   push: { branches: [main] }
   pull_request:
+  workflow_dispatch:
   schedule:
     # Early warning that the SDK broke us, before a user finds out.
     - cron: '17 6 * * *'
@@ -78,3 +79,53 @@ jobs:
               if(bad.length){console.error('unexpected in tarball:',bad);process.exit(1)}
               console.log(files.length+' files, all expected');
             })"
+
+  # Tier 4 (plan §6, R1). Runs against @quaivault/sdk@latest rather than the
+  # pin, so the SDK moving under us surfaces here on a schedule instead of in
+  # a user's terminal. Deliberately never part of the PR gate: it is expected
+  # to go red on its own, and a red gate that nobody can fix by editing their
+  # own branch is a gate people learn to ignore.
+  #
+  # A typecheck alone would not be enough. When `proposedAt` became 0 on
+  # indexer reads the type never changed, only the meaning did -- so
+  # test/contract asserts behaviour, not shape.
+  sdk-contract:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with: { node-version: '22', cache: npm }
+      - run: npm ci --ignore-scripts
+      - name: baseline — the pinned SDK must be green before we blame @latest
+        run: npm run test:sdk-contract
+      - name: install @quaivault/sdk@latest
+        id: bump
+        run: |
+          PINNED=$(node -p "require('./node_modules/@quaivault/sdk/package.json').version")
+          # An ERESOLVE here is itself the finding: the new SDK widened or
+          # moved its quais peer allowlist away from the version we declare.
+          npm install --ignore-scripts @quaivault/sdk@latest
+          LATEST=$(node -p "require('./node_modules/@quaivault/sdk/package.json').version")
+          echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "### SDK contract check" >> "$GITHUB_STEP_SUMMARY"
+          echo "pinned \`$PINNED\` → latest \`$LATEST\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$PINNED" = "$LATEST" ]; then
+            echo "no new release; this run only reconfirms the pin" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: quais is still single-copy and inside the new peer range
+        run: |
+          npm ls quais
+          node -e "
+            const range=require('./node_modules/@quaivault/sdk/package.json').peerDependencies.quais;
+            const v=require('./node_modules/quais/package.json').version;
+            if(!range.split('||').map(s=>s.trim()).includes(v)){
+              console.error('quais '+v+' outside new SDK peer range '+range);process.exit(1)}
+            console.log('quais '+v+' in range '+range);"
+      - name: typecheck against @latest
+        run: npm run typecheck
+      - name: semantic invariants against @latest
+        run: npm run test:sdk-contract
+      - name: full suite against @latest
+        run: npm test

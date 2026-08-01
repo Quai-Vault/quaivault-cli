@@ -28,7 +28,7 @@ function usesIn(file: string): UseSite[] {
   const out: UseSite[] = [];
   text.split('\n').forEach((raw, i) => {
     const m = /^\s*-?\s*uses:\s*(\S+)/.exec(raw);
-    if (m) out.push({ file, line: i + 1, ref: m[1], raw });
+    if (m?.[1]) out.push({ file, line: i + 1, ref: m[1], raw });
   });
   return out;
 }

@@ -21,6 +21,6 @@ const boom = (what: string) => () => {
 globalThis.fetch = boom('fetch');
 (globalThis as Record<string, unknown>).WebSocket = boom('WebSocket');
 
-net.connect = boom('net.connect') as never;
-net.createConnection = boom('net.createConnection') as never;
-net.Socket.prototype.connect = boom('net.Socket#connect') as never;
+net.connect = boom('net.connect');
+net.createConnection = boom('net.createConnection');
+net.Socket.prototype.connect = boom('net.Socket#connect');
