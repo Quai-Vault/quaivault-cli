@@ -1,0 +1,80 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+  schedule:
+    # Early warning that the SDK broke us, before a user finds out.
+    - cron: '17 6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with: { node-version: '${{ matrix.node }}', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      # Exactly one copy of quais, and within the SDK's declared peer range.
+      # `--legacy-peer-deps` can bypass the allowlist silently.
+      - name: quais is single-copy and in range
+        run: |
+          COUNT=$(npm ls quais --json | node -e "
+            let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+              const seen=new Set();
+              (function walk(n){ if(!n)return;
+                for (const [k,v] of Object.entries(n.dependencies||{})) {
+                  if (k==='quais' && v.version) seen.add(v.version);
+                  walk(v);
+                }})(JSON.parse(s));
+              console.log(seen.size);
+            })")
+          test "$COUNT" = "1" || { echo "expected 1 quais version, found $COUNT"; exit 1; }
+          node -e "
+            const {createRequire}=require('node:module');const r=createRequire(process.cwd()+'/x.js');
+            const range=require('./node_modules/@quaivault/sdk/package.json').peerDependencies.quais;
+            const entry=r.resolve('quais');const m='/quais/';
+            const v=require(entry.slice(0,entry.lastIndexOf(m)+m.length)+'package.json').version;
+            if(!range.split('||').map(s=>s.trim()).includes(v)){
+              console.error('quais '+v+' outside SDK peer range '+range); process.exit(1);}
+            console.log('quais '+v+' in range '+range);"
+      - run: npm audit signatures
+
+  package:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with: { node-version: '${{ matrix.node }}', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      # Export-map, shebang, executable-bit and ESM-under-npx failures are
+      # invisible to source-tree tests. This is the only thing that catches them.
+      - name: pack, install clean, run
+        run: |
+          npm pack
+          mkdir -p /tmp/consumer && cd /tmp/consumer && npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE"/quaivault-cli-*.tgz
+          ./node_modules/.bin/qv --version
+          ./node_modules/.bin/quaivault --help >/dev/null
+          ./node_modules/.bin/qv addr check 0x0081f4e8a9b0c1d2e3f405162738495a6b7c8d78 | grep -q "NOT usable"
+      - name: no unexpected files in the tarball
+        run: |
+          npm pack --dry-run --json | node -e "
+            let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+              const files=JSON.parse(s)[0].files.map(f=>f.path);
+              const bad=files.filter(f=>!/^(dist\/|README|LICENSE|package\.json)/.test(f));
+              if(bad.length){console.error('unexpected in tarball:',bad);process.exit(1)}
+              console.log(files.length+' files, all expected');
+            })"

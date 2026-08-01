@@ -1,0 +1,234 @@
+import type {
+  Affordance,
+  IndexerHealth,
+  QuaiVaultClient,
+  VaultInfo,
+  VaultTransaction,
+  Page,
+} from '@quaivault/sdk';
+import type { AppContext, GlobalFlags } from '../src/context/context.js';
+import { createBufferIo } from '../src/render/io.js';
+import type { CliConfig } from '../src/context/config.js';
+import type { Policy } from '../src/context/policy.js';
+
+/**
+ * A hand-written fake, typed against the real SDK — **not `vi.mock`**.
+ *
+ * A module mock does not typecheck against the SDK, so when the SDK changes a
+ * return shape the tests stay green while the CLI is broken. This fake fails
+ * `npm run typecheck` on the same change, which is the whole point: it is the
+ * main defence against drift in a dependency that shipped six releases in two
+ * days (plan §6, Tier 2).
+ */
+export interface FakeVaultState {
+  info: VaultInfo;
+  pending: VaultTransaction[];
+  history: VaultTransaction[];
+  affordances: Record<string, Affordance[]>;
+  hasPendingRecovery: boolean;
+}
+
+export interface FakeOptions {
+  vaults?: Record<string, Partial<FakeVaultState>>;
+  health?: Partial<IndexerHealth>;
+  forOwner?: string[];
+  forGuardian?: string[];
+}
+
+export const ADDR = {
+  vault: '0x005f2629A632962f4944d23686efDa5c160d535b',
+  alice: '0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781',
+  bob: '0x00a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3',
+  carol: '0x0072aa11bb22cc33dd44ee55ff66007788990aa1',
+  token: '0x0033333333333333333333333333333333333333',
+} as const;
+
+export function fakeVaultInfo(over: Partial<VaultInfo> = {}): VaultInfo {
+  return {
+    address: ADDR.vault,
+    owners: [ADDR.alice, ADDR.bob, ADDR.carol],
+    threshold: 2,
+    minExecutionDelay: 0,
+    nonce: 3,
+    balance: 1_240_503_100_000_000_000_000n,
+    moduleCount: 1,
+    ...over,
+  };
+}
+
+export function fakeTx(over: Partial<VaultTransaction> = {}): VaultTransaction {
+  return {
+    hash: `0x${'8a3f9c21'.repeat(8)}`,
+    vault: ADDR.vault,
+    to: ADDR.alice,
+    value: 100_000_000_000_000_000_000n,
+    data: '0x',
+    proposer: ADDR.bob,
+    proposedAt: 0,
+    proposedAtBlock: 9_272_800,
+    kind: 'transfer',
+    summary: 'Transfer 100 QUAI to 0x001f…d781',
+    abiSource: 'builtin',
+    status: 'pending',
+    approvals: [
+      { owner: ADDR.bob, active: true },
+      { owner: ADDR.alice, active: false },
+    ],
+    approvalCount: 1,
+    threshold: 2,
+    expiration: 0,
+    executionDelay: 0,
+    approvedAt: 0,
+    executableAfter: 0,
+    source: 'indexer',
+    ...over,
+  };
+}
+
+export function fakeAffordance(over: Partial<Affordance> = {}): Affordance {
+  return { action: 'approve', allowed: true, reason: 'You are an owner and have not approved.', ...over };
+}
+
+function page<T>(data: T[]): Page<T> {
+  return { data, total: data.length, hasMore: false };
+}
+
+export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
+  const health: IndexerHealth = {
+    available: true,
+    lastIndexedBlock: 9_272_851,
+    chainHead: 9_272_855,
+    blocksBehind: 4,
+    isSyncing: false,
+    ...opts.health,
+  };
+
+  const stateFor = (address: string): FakeVaultState => {
+    const over = opts.vaults?.[address.toLowerCase()] ?? opts.vaults?.[address] ?? {};
+    return {
+      info: fakeVaultInfo({ address }),
+      pending: [],
+      history: [],
+      affordances: {},
+      hasPendingRecovery: false,
+      ...over,
+    };
+  };
+
+  const vault = (address: string) => {
+    const st = stateFor(address);
+    return {
+      info: () => Promise.resolve(st.info),
+      pendingTransactions: () => Promise.resolve(st.pending),
+      transactionHistory: () => Promise.resolve(page(st.history)),
+      transaction: (hash: string) => {
+        const found = [...st.pending, ...st.history].find(
+          (t) => t.hash.toLowerCase() === hash.toLowerCase(),
+        );
+        if (!found) return Promise.reject(new Error(`no such transaction ${hash}`));
+        return Promise.resolve(found);
+      },
+      affordances: (hash: string) => Promise.resolve(st.affordances[hash] ?? []),
+      balances: () => Promise.resolve({ native: st.info.balance, tokens: [] }),
+      signedMessages: () => Promise.resolve([]),
+      recovery: {
+        hasPending: () => Promise.resolve(st.hasPendingRecovery),
+        pending: () =>
+          Promise.resolve(
+            st.hasPendingRecovery
+              ? [
+                  {
+                    hash: `0x${'re'.repeat(32)}`,
+                    vault: address,
+                    newOwners: [ADDR.carol],
+                    newThreshold: 1,
+                    approvalCount: 2,
+                    requiredThreshold: 2,
+                    executionTime: Math.floor(Date.now() / 1000) + 3600,
+                    expiration: Math.floor(Date.now() / 1000) + 86_400,
+                    status: 'pending' as const,
+                    executed: false,
+                    source: 'indexer' as const,
+                  },
+                ]
+              : [],
+          ),
+      },
+    };
+  };
+
+  return {
+    indexerHealth: () => Promise.resolve(health),
+    vault,
+    vaults: {
+      forOwner: () => Promise.resolve(opts.forOwner ?? []),
+      forGuardian: () => Promise.resolve(opts.forGuardian ?? []),
+    },
+    now: () => Math.floor(Date.now() / 1000),
+  } as unknown as QuaiVaultClient;
+}
+
+export function fakeFlags(over: Partial<GlobalFlags> = {}): GlobalFlags {
+  return {
+    json: false,
+    yes: false,
+    noInput: true,
+    quiet: false,
+    debug: false,
+    wide: false,
+    color: 'never',
+    dryRun: false,
+    iUnderstandUnverified: false,
+    ...over,
+  };
+}
+
+export interface FakeContextOptions {
+  client?: QuaiVaultClient;
+  flags?: Partial<GlobalFlags>;
+  identity?: string;
+  aliases?: Record<string, string>;
+  contacts?: Record<string, string>;
+  policy?: Policy | null;
+  interactive?: boolean;
+  now?: number;
+}
+
+export function createFakeContext(opts: FakeContextOptions = {}): AppContext & {
+  io: ReturnType<typeof createBufferIo>;
+} {
+  const io = createBufferIo(80);
+  const config: CliConfig = {
+    defaultProfile: 'default',
+    profiles: { default: { network: 'mainnet', address: opts.identity } },
+    aliases: opts.aliases ?? {},
+    contacts: opts.contacts ?? {},
+  };
+  const reverse = new Map(
+    Object.entries(config.contacts).map(([n, a]) => [a.toLowerCase(), n] as const),
+  );
+  const fixedNow = opts.now ?? 1_785_000_000;
+  return {
+    qv: opts.client ?? createFakeClient(),
+    config,
+    profile: config.profiles.default!,
+    profileName: 'default',
+    flags: fakeFlags(opts.flags),
+    io,
+    now: () => fixedNow,
+    skew: { offsetSeconds: 0, detected: false },
+    policy: opts.policy ?? null,
+    interactive: opts.interactive ?? false,
+    resolveVault(nameOrAddress) {
+      const c = nameOrAddress ?? ADDR.vault;
+      return config.aliases[c] ?? c;
+    },
+    contactName: (address) => reverse.get(address.toLowerCase()),
+    identity: () => opts.identity,
+    requireSigner: () =>
+      Promise.resolve({
+        signer: {} as never,
+        address: opts.identity ?? ADDR.bob,
+      }),
+  };
+}

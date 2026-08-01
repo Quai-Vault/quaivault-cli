@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+.DS_Store
+
+# `npm pack` output. CI builds the tarball it verifies; a checked-in one is
+# stale by definition and would ship whatever was on disk the day it landed.
+*.tgz

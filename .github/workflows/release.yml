@@ -1,0 +1,40 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write   # npm trusted publishing (OIDC); no NPM_TOKEN to leak
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with: { node-version: '22', registry-url: 'https://registry.npmjs.org' }
+      - run: npm install -g npm@11.6.2 --ignore-scripts
+      - run: npm ci --ignore-scripts
+      - name: tag matches package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./package.json').version")
+          test "$TAG" = "$PKG" || { echo "tag $TAG != package $PKG"; exit 1; }
+      - run: npm run check
+      - run: npm run build
+      - run: npm publish --provenance --access public
+      - name: post-publish install smoke test
+        # The registry can advertise `latest` before the tarball is fetchable —
+        # observed as a ~5 minute 404 window. Retry rather than fail the release.
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          for i in $(seq 1 20); do
+            mkdir -p /tmp/verify-$i && cd /tmp/verify-$i && npm init -y >/dev/null
+            if npm install "@quaivault/cli@$VER" >/dev/null 2>&1; then
+              ./node_modules/.bin/qv --version
+              echo "install verified on attempt $i"; exit 0
+            fi
+            echo "attempt $i: not fetchable yet, waiting"; sleep 20
+          done
+          echo "tarball never became fetchable"; exit 1
