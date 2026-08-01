@@ -1,5 +1,6 @@
 import type { RecoveryRequest, RecoveryConfig } from '@quaivault/sdk';
 import type { CommandSpec, WritePlan } from '../cli/spec.js';
+import { cacheKey } from '../store/index.js';
 import { PreconditionError, UsageError, type AppContext } from '../context/context.js';
 import { promptTyped } from '../cli/confirm.js';
 import { span } from '../format/tone.js';
@@ -24,6 +25,9 @@ interface RecoveryStatusData {
 
 export const recoveryStatusCommand: CommandSpec<{ vault?: string }, RecoveryStatusData> = {
   path: ['recovery', 'status'],
+  key: (input) => cacheKey(['recovery', 'status'], input.vault),
+  invalidatedBy: ['recoveries'],
+  scopeVault: (input) => input.vault,
   describe: 'Guardian configuration and any pending recovery',
   args: [{ name: 'vault', description: 'vault alias or address' }],
 

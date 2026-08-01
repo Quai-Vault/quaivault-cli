@@ -1,4 +1,4 @@
-import type { Affordance, VaultTransaction } from '@quaivault/sdk';
+import type { Affordance, Subscription, VaultTransaction, WatchEvent } from '@quaivault/sdk';
 import type { CommandSpec } from '../cli/spec.js';
 import { UsageError, type AppContext } from '../context/context.js';
 import { span } from '../format/tone.js';
@@ -6,6 +6,8 @@ import { abiSourceBadge, safeText } from '../format/index.js';
 import { renderDisclosure } from '../render/transaction.js';
 import { promptYesNo } from '../cli/confirm.js';
 import { spawnSigner } from '../tui/spawn-signer.js';
+import { ChangeFeed } from '../store/index.js';
+import { planChannels, describeChannels, type ChannelPlan } from '../store/channels.js';
 import {
   initialState,
   reduce,
@@ -24,7 +26,9 @@ import {
  * Bare `qv` never launches this — an agent must not land in a full-screen app
  * it cannot exit.
  */
-async function loadRows(ctx: AppContext): Promise<{ rows: TuiRow[]; degraded: boolean }> {
+async function loadRows(
+  ctx: AppContext,
+): Promise<{ rows: TuiRow[]; degraded: boolean; vaults: string[] }> {
   const identity = ctx.identity();
   if (!identity) throw new UsageError('No identity set.', 'qv use --as 0x…');
   const [owned, guardian, health] = await Promise.all([
@@ -53,7 +57,62 @@ async function loadRows(ctx: AppContext): Promise<{ rows: TuiRow[]; degraded: bo
       });
     }),
   );
-  return { rows, degraded: health?.available === false };
+  return { rows, degraded: health?.available === false, vaults };
+}
+
+/**
+ * Subscribe within the channel budget and let the feed drive refreshes
+ * (plan §5.2, Phase 6).
+ *
+ * The feed only ever marks entries stale — it never patches state from a
+ * `WatchEvent.row`. A raw Postgres row has no affordances, no decode and no
+ * timelock arithmetic, so treating one as state would mean reimplementing
+ * `computeAffordances` against raw columns on the surface where a human
+ * decides whether to sign.
+ *
+ * Returns a teardown that closes every channel.
+ */
+function subscribeWithin(
+  ctx: AppContext,
+  vaults: readonly string[],
+  onChange: () => void,
+): { plan: ChannelPlan; close: () => void } {
+  const plan = planChannels(vaults);
+  const feed = new ChangeFeed(ctx.store);
+  const subs: Subscription[] = [];
+  const off = feed.subscribe(() => onChange());
+  for (const address of plan.subscribed) {
+    try {
+      subs.push(
+        ctx.qv.vault(address).watch((event: WatchEvent) => feed.push(address, event), {
+          topics: ['transactions', 'confirmations', 'owners'],
+        }),
+      );
+    } catch {
+      // A channel that will not open is a degraded refresh, not a dead UI:
+      // `r` still works and the tail is polled anyway.
+    }
+  }
+  return {
+    plan,
+    close: () => {
+      off();
+      for (const sub of subs) {
+        try {
+          void sub.unsubscribe();
+        } catch {
+          // Teardown races the process exiting; nothing useful to do.
+        }
+      }
+    },
+  };
+}
+
+/** Order-insensitive set comparison, so a reordered vault list is not a churn. */
+function sameSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const left = new Set(a.map((x) => x.toLowerCase()));
+  return b.every((x) => left.has(x.toLowerCase()));
 }
 
 function labelFor(ctx: AppContext, address: string): string {
@@ -84,11 +143,22 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
     let state = initialState(Math.max(5, (process.stdout.rows ?? 24) - 12));
     const io = ctx.io;
 
+    let watching: { plan: ChannelPlan; close: () => void } | undefined;
+
     const refresh = async (): Promise<void> => {
       state = reduce(state, { type: 'loading' });
       try {
-        const { rows, degraded } = await loadRows(ctx);
+        const { rows, degraded, vaults } = await loadRows(ctx);
         state = reduce(state, { type: 'data', rows, degraded, at: ctx.now() });
+        // Re-plan on every load: the vault set can change while the TUI is
+        // open, and a subscription to a vault that is no longer ours is a
+        // wasted channel out of a capped budget.
+        if (!watching || !sameSet(watching.plan.subscribed, vaults)) {
+          watching?.close();
+          watching = subscribeWithin(ctx, vaults, () => {
+            void refresh().then(draw);
+          });
+        }
       } catch (err) {
         state = reduce(state, {
           type: 'error',
@@ -103,7 +173,13 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
       io.out(
         state.pane.status === 'degraded'
           ? io.paint(span('indexer unavailable — this list is incomplete, not empty', 'danger'))
-          : io.paint(span(`${state.rows.length} pending · ${state.pane.status}`, 'muted')),
+          : io.paint(
+              span(
+                `${state.rows.length} pending · ${state.pane.status}` +
+                  (watching ? ` · ${describeChannels(watching.plan)}` : ''),
+                'muted',
+              ),
+            ),
       );
       io.out('');
       if (state.route === 'inbox') {

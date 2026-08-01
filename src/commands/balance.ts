@@ -1,5 +1,6 @@
 import type { VaultBalances } from '@quaivault/sdk';
 import type { CommandSpec } from '../cli/spec.js';
+import { cacheKey } from '../store/index.js';
 import { span } from '../format/tone.js';
 import { formatQuai, formatUnits, safeText } from '../format/index.js';
 
@@ -14,6 +15,9 @@ export const balanceCommand: CommandSpec<
   BalanceData
 > = {
   path: ['balance'],
+  key: (input) => cacheKey(['balance'], input.vault, input.nfts ? 'nfts' : ''),
+  invalidatedBy: ['deposits', 'tokenTransfers'],
+  scopeVault: (input) => input.vault,
   describe: 'Native and token balances held by a vault',
   args: [{ name: 'vault', description: 'vault alias or address' }],
   options: [
@@ -118,6 +122,9 @@ export const messagesCommand: CommandSpec<
   { address: string; messages: unknown[] }
 > = {
   path: ['messages'],
+  key: (input) => cacheKey(['messages'], input.vault),
+  invalidatedBy: ['signedMessages'],
+  scopeVault: (input) => input.vault,
   describe: 'EIP-1271 messages this vault has signed',
   args: [{ name: 'vault', description: 'vault alias or address' }],
   needs: { indexer: 'required' },

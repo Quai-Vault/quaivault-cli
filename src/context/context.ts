@@ -3,6 +3,7 @@ import type { Signer } from 'quais';
 import type { Io } from '../render/io.js';
 import type { CliConfig, Profile } from './config.js';
 import type { Policy } from './policy.js';
+import type { ResultStore } from '../store/index.js';
 import type { SkewState } from './client.js';
 
 export interface GlobalFlags {
@@ -33,6 +34,12 @@ export interface AppContext {
   readonly skew: SkewState;
   /** `null` means no policy file exists. Not the same as an empty policy. */
   readonly policy: Policy | null;
+  /**
+   * Process-lifetime result cache (plan §5.2). Trivially useful in one-shot —
+   * it coalesces the duplicate reads a cross-vault fan-out produces — and the
+   * thing the TUI subscribes to.
+   */
+  readonly store: ResultStore;
   /** Can we prompt? Based on /dev/tty being openable, not stdin.isTTY. */
   readonly interactive: boolean;
   /** Resolve an alias or raw address to an address. */

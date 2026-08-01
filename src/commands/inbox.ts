@@ -1,5 +1,6 @@
 import type { Affordance, VaultTransaction } from '@quaivault/sdk';
 import type { CommandSpec } from '../cli/spec.js';
+import { cacheKey } from '../store/index.js';
 import { UsageError } from '../context/context.js';
 import { span } from '../format/tone.js';
 import {
@@ -40,6 +41,10 @@ const EXPIRING_SOON_SECONDS = 24 * 3600;
  */
 export const inboxCommand: CommandSpec<{ count?: boolean; limit?: string }, InboxData> = {
   path: ['inbox'],
+  // Deliberately not vault-scoped: inbox spans every vault the identity
+  // touches, so a change to any one of them makes the whole view wrong.
+  key: (input) => cacheKey(['inbox'], input.limit),
+  invalidatedBy: ['transactions', 'confirmations', 'owners'],
   describe: 'What is waiting on you, across every vault',
   options: [
     { flags: '--count', description: 'print a bare integer for a shell prompt', defaultValue: false },

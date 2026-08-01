@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { ENV_VARS } from '@quaivault/sdk';
 import { readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import type { CommandSpec } from '../cli/spec.js';
@@ -9,6 +10,7 @@ import { formatDuration, SECONDS_PER_BLOCK } from '../format/index.js';
 import { SKEW_WARN_THRESHOLD_SECONDS } from '../context/client.js';
 import { canPrompt } from '../cli/tty.js';
 import { detectSkew } from '../context/skew.js';
+import { planChannels, describeChannels } from '../store/channels.js';
 
 interface Check {
   name: string;
@@ -138,6 +140,46 @@ export const doctorCommand: CommandSpec<Record<string, never>, DoctorData> = {
       advice: ctx.identity() ? undefined : 'qv use --as 0x…  (no key required)',
     });
     checks.push({ name: 'tty', ok: true, detail: canPrompt() ? 'available' : 'none (non-interactive)' });
+
+    // The channel budget, stated rather than discovered (plan Phase 6).
+    // watchVault opens one WebSocket per vault and Realtime caps concurrent
+    // channels, so an owner of thirty vaults silently stops receiving events
+    // for some of them. A screen that looks live and is not is the failure
+    // mode; this is what makes it visible.
+    const identity = ctx.identity();
+    let vaultCount = 0;
+    if (identity) {
+      const [owned, guardian] = await Promise.all([
+        ctx.qv.vaults.forOwner(identity).catch(() => [] as string[]),
+        ctx.qv.vaults.forGuardian(identity).catch(() => [] as string[]),
+      ]);
+      vaultCount = new Set([...owned, ...guardian].map((v) => v.toLowerCase())).size;
+    }
+    const channels = planChannels(Array.from({ length: vaultCount }, (_, i) => `0x${i}`));
+    checks.push({
+      name: 'channels',
+      ok: !channels.degraded,
+      detail: identity ? describeChannels(channels) : 'no identity set — nothing to watch',
+      advice: channels.degraded
+        ? 'Vaults beyond the budget are polled, so their updates arrive on refresh rather than instantly.'
+        : undefined,
+    });
+
+    // §3.5: every keyless command passes `useEnv: false`, so a variable set
+    // here does *not* silently take effect. Reporting names and set/unset —
+    // never values, since one of them is QUAIVAULT_PRIVATE_KEY — turns "why
+    // is it using the wrong network" into a one-line answer in a paste.
+    const setVars = Object.entries(ENV_VARS)
+      .filter(([, name]) => process.env[name] !== undefined && process.env[name] !== '')
+      .map(([, name]) => name);
+    checks.push({
+      name: 'env',
+      ok: true,
+      detail: setVars.length ? setVars.join(', ') : 'none set',
+      advice: setVars.includes(ENV_VARS.privateKey)
+        ? `${ENV_VARS.privateKey} is set. Reads never load it (useEnv: false), but a key in the environment is the least-preferred way to hold one — prefer QUAIVAULT_PRIVATE_KEY_FILE or a keystore.`
+        : undefined,
+    });
 
     void chainHead;
     return { data: { checks, healthy: checks.every((c) => c.ok) }, changed: false };

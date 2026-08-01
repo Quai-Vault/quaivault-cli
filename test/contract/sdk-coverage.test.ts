@@ -236,13 +236,7 @@ const ERROR_CLASSES = new Set([
  * These are findings, tracked in the open rather than absent. Delete an entry
  * when it is fixed — the test will tell you to.
  */
-const KNOWN_GAPS: Record<string, string> = {
-  ENV_VARS:
-    'R9 wants `qv doctor` to be a paste-able bug report, and the SDK already ' +
-    'enumerates every variable it reads. doctor should report which of them are ' +
-    'set — names and set/unset only, never values, since one of them is ' +
-    'QUAIVAULT_PRIVATE_KEY.',
-};
+const KNOWN_GAPS: Record<string, string> = {};
 
 describe('SDK surface coverage', () => {
   const exports = publicExports();

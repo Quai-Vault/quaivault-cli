@@ -15,6 +15,7 @@ import { ExitCode, exitCodeForErrorCode, type ExitCodeValue } from './exit.js';
 import { canPrompt } from './tty.js';
 import { commandId, type CommandSpec } from './spec.js';
 import { confirm } from './confirm.js';
+import { ResultStore } from '../store/index.js';
 import { resolveSigner, type SignerResolution } from '../keys/signer.js';
 
 export interface RunOptions {
@@ -45,6 +46,7 @@ function buildContext(flags: GlobalFlags, io: Io, held: { signer?: SignerResolut
   const qv = createClient({ profile, now });
   const policy = loadPolicy();
   const interactive = canPrompt() && !flags.noInput;
+  const store = new ResultStore(now);
 
   const reverseContacts = new Map<string, string>();
   for (const [name, addr] of Object.entries(config.contacts)) {
@@ -61,6 +63,7 @@ function buildContext(flags: GlobalFlags, io: Io, held: { signer?: SignerResolut
     now,
     skew,
     policy,
+    store,
     interactive,
     resolveVault(nameOrAddress) {
       const candidate = nameOrAddress ?? flags.vault ?? process.env.QUAIVAULT_VAULT ?? profile.vault;
@@ -129,9 +132,23 @@ export async function runCommand(opts: RunOptions): Promise<ExitCodeValue> {
       );
     }
 
+    const active = ctx;
     let result;
     if (opts.spec.run) {
-      result = await opts.spec.run(ctx, opts.input, signal);
+      // Reads go through the store (plan §5.2). In one-shot this mostly
+      // coalesces a command's own fan-out; the descriptor's `key` is what
+      // lets the TUI reuse and invalidate the same entry. A command with no
+      // `key` is never cached — which is correct for anything that must be
+      // read fresh, and for every write.
+      const run = opts.spec.run;
+      const key = opts.spec.key?.(opts.input);
+      const scoped = opts.spec.scopeVault?.(opts.input);
+      result = key
+        ? await active.store.resolve(key, () => run(active, opts.input, signal), {
+            ...(opts.spec.invalidatedBy ? { topics: opts.spec.invalidatedBy } : {}),
+            ...(scoped ? { vault: active.resolveVault(scoped) } : {}),
+          })
+        : await run(active, opts.input, signal);
     } else if (opts.spec.plan && opts.spec.commit) {
       const planned = await opts.spec.plan(ctx, opts.input, signal);
 

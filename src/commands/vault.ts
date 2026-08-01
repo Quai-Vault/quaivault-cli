@@ -1,5 +1,6 @@
 import type { VaultInfo, VaultTransaction } from '@quaivault/sdk';
 import type { CommandSpec } from '../cli/spec.js';
+import { cacheKey } from '../store/index.js';
 import { UsageError } from '../context/context.js';
 import { span } from '../format/tone.js';
 import { formatDuration, formatQuai, safeText } from '../format/index.js';
@@ -17,6 +18,9 @@ interface VaultShowData {
 
 export const vaultShowCommand: CommandSpec<{ vault?: string }, VaultShowData> = {
   path: ['vault', 'show'],
+  key: (input) => cacheKey(['vault', 'show'], input.vault),
+  invalidatedBy: ['owners', 'modules', 'transactions', 'confirmations'],
+  scopeVault: (input) => input.vault,
   describe: 'Vault owners, threshold, balance, timelock and pending transactions',
   args: [{ name: 'vault', description: 'vault alias or address' }],
   needs: { indexer: 'preferred' },
@@ -126,6 +130,8 @@ interface VaultLsData {
 
 export const vaultLsCommand: CommandSpec<{ role?: string }, VaultLsData> = {
   path: ['vault', 'ls'],
+  key: () => cacheKey(['vault', 'ls']),
+  invalidatedBy: ['owners'],
   describe: 'Vaults you own or guard',
   options: [
     { flags: '--role <role>', description: 'filter by role', choices: ['owner', 'guardian'] },

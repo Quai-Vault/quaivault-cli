@@ -1,4 +1,5 @@
 import { mainnet, interfaces } from '@quaivault/sdk';
+import { ResultStore } from '../src/store/index.js';
 import type {
   Affordance,
   IndexerHealth,
@@ -225,6 +226,7 @@ export function createFakeContext(opts: FakeContextOptions = {}): AppContext & {
     now: () => fixedNow,
     skew: { offsetSeconds: 0, detected: false },
     policy: opts.policy ?? null,
+    store: new ResultStore(() => fixedNow),
     interactive: opts.interactive ?? false,
     resolveVault(nameOrAddress) {
       const c = nameOrAddress ?? ADDR.vault;

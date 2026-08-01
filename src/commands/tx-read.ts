@@ -1,6 +1,7 @@
 import { keccak256 } from 'quais';
 import type { Affordance, VaultTransaction, TransactionStatus } from '@quaivault/sdk';
 import type { CommandSpec } from '../cli/spec.js';
+import { cacheKey } from '../store/index.js';
 import { UsageError, PreconditionError } from '../context/context.js';
 import type { AppContext } from '../context/context.js';
 import { span } from '../format/tone.js';
@@ -77,6 +78,12 @@ interface TxShowData {
 
 export const txShowCommand: CommandSpec<{ vault?: string; hash: string }, TxShowData> = {
   path: ['tx', 'show'],
+  // A transaction's approval set and status both move under it, and its
+  // decode never does. `confirmations` matters as much as `transactions`:
+  // an approval arriving is the change a co-signer is waiting to see.
+  key: (input) => cacheKey(['tx', 'show'], input.vault, input.hash),
+  invalidatedBy: ['transactions', 'confirmations'],
+  scopeVault: (input) => input.vault,
   describe: 'Full detail of one transaction, with what you can do about it',
   args: [
     { name: 'vault', description: 'vault alias or address', required: true },
@@ -227,6 +234,9 @@ function renderList(
 
 export const txLsCommand: CommandSpec<{ vault?: string; limit?: string }, TxListData> = {
   path: ['tx', 'ls'],
+  key: (input) => cacheKey(['tx', 'ls'], input.vault, input.limit),
+  invalidatedBy: ['transactions', 'confirmations'],
+  scopeVault: (input) => input.vault,
   describe: 'Pending transactions on a vault',
   args: [{ name: 'vault', description: 'vault alias or address' }],
   options: [{ flags: '--limit <n>', description: 'maximum rows', defaultValue: '50' }],

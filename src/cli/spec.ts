@@ -1,3 +1,4 @@
+import type { WatchTopic } from '@quaivault/sdk';
 import type { AppContext } from '../context/context.js';
 import type { Io } from '../render/io.js';
 import type { JsonValue } from '../util/json.js';
@@ -102,6 +103,27 @@ export interface CommandSpec<Input = any, Result = any, Plan = any> {
   toJson: (result: CommandResult<Result>, ctx: AppContext) => JsonValue;
   /** Machine-readable description of `toJson`'s shape, for `qv --schema`. */
   outputSchema: JsonValue;
+  /**
+   * Cache key for the `ResultStore` (plan §5.1, §5.2).
+   *
+   * Omitted means "never cache" — correct for anything that must be read
+   * fresh from chain, most importantly the pre-signature disclosure. A write
+   * command never has one.
+   */
+  key?: (input: Input) => string;
+  /**
+   * Watch topics whose events make a cached result stale.
+   *
+   * `watchVault` is a change feed, not a state source: an event means re-run
+   * `run()`, never "patch the cached value with this row".
+   */
+  invalidatedBy?: readonly WatchTopic[];
+  /**
+   * The vault a cached result belongs to, so a change to one vault does not
+   * invalidate every other vault's entry. Omitted for cross-vault views like
+   * `inbox`, which must go stale on a change anywhere.
+   */
+  scopeVault?: (input: Input) => string | undefined;
 }
 
 export function commandId(spec: CommandSpec): string {
