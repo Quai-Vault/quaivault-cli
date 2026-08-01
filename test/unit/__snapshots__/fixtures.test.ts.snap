@@ -1,0 +1,359 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`all four abiSources render distinctly (Phase 3 exit criterion) > snapshots the builtin disclosure 1`] = `
+"
+  Transfer 1.0 QUAI to 0x0072…0aa1
+  0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1
+
+  Decoded as   verified
+  To           0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781
+  Value        1 QUAI
+               exactly 1000000000000000000 wei
+  Operation    call (the vault has no top-level delegatecall)
+  Data         (none)
+
+  Approvals    1 of 2
+    [x] 0x00a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+    [ ] 0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781"
+`;
+
+exports[`all four abiSources render distinctly (Phase 3 exit criterion) > snapshots the heuristic disclosure 1`] = `
+"
+  Transfer 42 units of token 0x0033…3333 to 0x00A1…b2C3
+  0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2
+
+  Decoded as   guessed from selector
+               Identified by selector shape alone. The SDK does not know what contract this address is.
+  To           0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781
+  Value        100 QUAI
+               exactly 100000000000000000000 wei
+  Operation    call (the vault has no top-level delegatecall)
+  Data         68 bytes
+               selector  0xa9059cbb
+               [000]     00000000000000000000000000a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+               [032]     000000000000000000000000000000000000000000000000000000000000002a
+
+  Approvals    1 of 2
+    [x] 0x00a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+    [ ] 0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781"
+`;
+
+exports[`all four abiSources render distinctly (Phase 3 exit criterion) > snapshots the none disclosure 1`] = `
+"
+  Unknown call
+  0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4
+
+  Decoded as   unknown
+               No ABI matched. Raw calldata shown below is the only ground truth.
+  To           0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781
+  Value        100 QUAI
+               exactly 100000000000000000000 wei
+  Operation    call (the vault has no top-level delegatecall)
+  Data         unknown ABI — 68 bytes, showing raw calldata
+               selector  0xdeadbeef
+               [000]     1111111111111111111111111111111111111111111111111111111111111111
+               [032]     2222222222222222222222222222222222222222222222222222222222222222
+
+  Approvals    1 of 2
+    [x] 0x00a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+    [ ] 0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781"
+`;
+
+exports[`all four abiSources render distinctly (Phase 3 exit criterion) > snapshots the supplied disclosure 1`] = `
+"
+  stake(uint256) — decoded from a user-supplied ABI
+  0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3
+
+  Decoded as   supplied ABI
+               Decoded with an ABI supplied to this CLI, not one the SDK vouches for.
+  To           0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781
+  Value        100 QUAI
+               exactly 100000000000000000000 wei
+  Operation    call (the vault has no top-level delegatecall)
+  Data         36 bytes
+               selector  0xa694fc3a
+               [000]     0000000000000000000000000000000000000000000000000000000000000001
+
+  Approvals    1 of 2
+    [x] 0x00a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+    [ ] 0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781"
+`;
+
+exports[`batch disclosures snapshot > snapshots the builtins batch 1`] = `
+"
+  Batched call: 2 sub-transactions
+  0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5
+
+  Decoded as   verified
+  To           0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781
+  Value        100 QUAI
+               exactly 100000000000000000000 wei
+  Operation    call (the vault has no top-level delegatecall)
+  Data         260 bytes
+               selector  0x8d80ff0a
+               [000]     0000000000000000000000000000000000000000000000000000000000000020
+               [032]     00000000000000000000000000000000000000000000000000000000000000aa
+               [064]     000072aa11bb22cc33dd44ee55ff66007788990aa10000000000000000000000
+               [096]     000000000000000000000000000de0b6b3a76400000000000000000000000000
+               [128]     0000000000000000000000000000000000000000000000a1b2c3d4e5f6071829
+               [160]     3a4b5c6d7e8f90a1b2c300000000000000000000000000000000000000000000
+               [192]     00001bc16d674ec8000000000000000000000000000000000000000000000000
+               [224]     0000000000000000000000000000000000000000000000000000000000000000
+
+  Batch        2 sub-transactions
+
+  [1/2]      Transfer 1.0 QUAI to 0x0072…0aa1
+               call   verified
+               to     0x0072aa11bb22cc33dd44ee55ff66007788990aa1
+               value  1 QUAI
+                      exactly 1000000000000000000 wei
+               data   (none)
+
+  [2/2]      Transfer 2.0 QUAI to 0x00a1…b2c3
+               call   verified
+               to     0x00a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+               value  2 QUAI
+                      exactly 2000000000000000000 wei
+               data   (none)
+
+  Approvals    1 of 2
+    [x] 0x00a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+    [ ] 0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781"
+`;
+
+exports[`batch disclosures snapshot > snapshots the delegatecall batch 1`] = `
+"
+  Batched call: 3 sub-transactions
+  0xa7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7
+
+  Decoded as   verified
+  To           0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781
+  Value        100 QUAI
+               exactly 100000000000000000000 wei
+  Operation    call (the vault has no top-level delegatecall)
+  Data         420 bytes
+               selector  0x8d80ff0a
+               [000]     0000000000000000000000000000000000000000000000000000000000000020
+               [032]     0000000000000000000000000000000000000000000000000000000000000147
+               [064]     000072aa11bb22cc33dd44ee55ff66007788990aa10000000000000000000000
+               [096]     0000000000000000000000000000000000000000010000000000000000000000
+               [128]     0000000000000000000000000000000000000000000000333333333333333333
+               [160]     3333333333333333333300000000000000000000000000000000000000000000
+               [192]     0000000000000000000000000000000000000000000000000000000000000000
+               [224]     00000000000000000044a9059cbb00000000000000000000000000a1b2c3d4e5
+               [256]     f60718293a4b5c6d7e8f90a1b2c3000000000000000000000000000000000000
+               [288]     000000000000000000000000000101001f4e8a9b0c1d2e3f405162738495a6b7
+               [320]     c8d7810000000000000000000000000000000000000000000000000000000000
+               [352]     0000000000000000000000000000000000000000000000000000000000000000
+               [384]     000004deadbeef00000000000000000000000000000000000000000000000000
+
+  Batch        3 sub-transactions
+               contains a DELEGATECALL — that sub-call can rewrite vault storage
+
+  [1/3]      Transfer 0.000000000000000001 QUAI to 0x0072…0aa1
+               call   verified
+               to     0x0072aa11bb22cc33dd44ee55ff66007788990aa1
+               value  0.000000000000000001 QUAI
+                      exactly 1 wei
+               data   (none)
+
+  [2/3]      Transfer 1 units of token 0x0033…3333 to 0x00A1…b2C3
+               call   guessed from selector
+               to     0x0033333333333333333333333333333333333333
+               value  0 QUAI
+               data   68 bytes
+                      selector  0xa9059cbb
+                      [000]     00000000000000000000000000a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+                      [032]     0000000000000000000000000000000000000000000000000000000000000001
+
+  [3/3]      Call 0x001f…d781 (selector 0xdeadbeef)
+               DELEGATECALL   unknown
+               to     0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781
+               value  0 QUAI
+               data   unknown ABI — 4 bytes, showing raw calldata
+                      selector  0xdeadbeef
+
+  Approvals    1 of 2
+    [x] 0x00a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+    [ ] 0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781"
+`;
+
+exports[`batch disclosures snapshot > snapshots the mixed batch 1`] = `
+"
+  Batched call: 2 sub-transactions
+  0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6
+
+  Decoded as   verified
+  To           0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781
+  Value        100 QUAI
+               exactly 100000000000000000000 wei
+  Operation    call (the vault has no top-level delegatecall)
+  Data         324 bytes
+               selector  0x8d80ff0a
+               [000]     0000000000000000000000000000000000000000000000000000000000000020
+               [032]     00000000000000000000000000000000000000000000000000000000000000ee
+               [064]     000072aa11bb22cc33dd44ee55ff66007788990aa10000000000000000000000
+               [096]     000000000000000000000000000de0b6b3a76400000000000000000000000000
+               [128]     0000000000000000000000000000000000000000000000333333333333333333
+               [160]     3333333333333333333300000000000000000000000000000000000000000000
+               [192]     0000000000000000000000000000000000000000000000000000000000000000
+               [224]     00000000000000000044a9059cbb00000000000000000000000000a1b2c3d4e5
+               [256]     f60718293a4b5c6d7e8f90a1b2c3000000000000000000000000000000000000
+               [288]     000000000000000000000000002a000000000000000000000000000000000000
+
+  Batch        2 sub-transactions
+
+  [1/2]      Transfer 1.0 QUAI to 0x0072…0aa1
+               call   verified
+               to     0x0072aa11bb22cc33dd44ee55ff66007788990aa1
+               value  1 QUAI
+                      exactly 1000000000000000000 wei
+               data   (none)
+
+  [2/2]      Transfer 42 units of token 0x0033…3333 to 0x00A1…b2C3
+               call   guessed from selector
+               to     0x0033333333333333333333333333333333333333
+               value  0 QUAI
+               data   68 bytes
+                      selector  0xa9059cbb
+                      [000]     00000000000000000000000000a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+                      [032]     000000000000000000000000000000000000000000000000000000000000002a
+
+  Approvals    1 of 2
+    [x] 0x00a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+    [ ] 0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781"
+`;
+
+exports[`batch disclosures snapshot > snapshots the unreadable batch 1`] = `
+"
+  Batched call: 1 sub-transaction
+  0xb8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8
+
+  Decoded as   verified
+  To           0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781
+  Value        100 QUAI
+               exactly 100000000000000000000 wei
+  Operation    call (the vault has no top-level delegatecall)
+  Data         164 bytes
+               selector  0x8d80ff0a
+               [000]     0000000000000000000000000000000000000000000000000000000000000020
+               [032]     0000000000000000000000000000000000000000000000000000000000000057
+               [064]     000072aa11bb22cc33dd44ee55ff66007788990aa10000000000000000000000
+               [096]     0000000000000000000000000000000000000000000000000000000000000000
+               [128]     000000000000000000000000000000000000000000abcd000000000000000000
+
+  Batch        UNREADABLE — the batch payload is 87 bytes but only 85 decode as sub-calls — 2 unaccounted for
+               Treated as containing a delegatecall, because it might.
+
+  Approvals    1 of 2
+    [x] 0x00a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3
+    [ ] 0x001f4e8a9b0c1d2e3f405162738495a6b7c8d781"
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered AbortError 1`] = `
+{
+  "code": "ABORTED",
+  "message": "The read was cancelled. was aborted.",
+  "next": undefined,
+  "remediation": undefined,
+}
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered ConfigError 1`] = `
+{
+  "code": "CONFIG",
+  "message": "QUAIVAULT_RPC_URL is not a valid URL.",
+  "next": [
+    "qv doctor",
+  ],
+  "remediation": undefined,
+}
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered IndexerQueryError 1`] = `
+{
+  "code": "INDEXER_QUERY",
+  "message": "relation "transactions" does not exist",
+  "next": [
+    "qv status",
+  ],
+  "remediation": undefined,
+}
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered NoIndexerError 1`] = `
+{
+  "code": "NO_INDEXER",
+  "message": "No indexer is configured for this network. requires the indexer, which is not configured.",
+  "next": [
+    "qv status",
+  ],
+  "remediation": "Set QUAIVAULT_INDEXER_URL, QUAIVAULT_INDEXER_ANON_KEY and QUAIVAULT_INDEXER_SCHEMA.",
+}
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered NoSignerError 1`] = `
+{
+  "code": "NO_SIGNER",
+  "message": "This command signs; no key is unlocked. requires a signer.",
+  "next": [
+    "qv key import",
+    "qv key ls",
+  ],
+  "remediation": "Pass connect({ privateKey }) or connect({ signer }), or set QUAIVAULT_PRIVATE_KEY.",
+}
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered NotFoundError 1`] = `
+{
+  "code": "NOT_FOUND",
+  "message": "No such transaction on this vault.",
+  "next": undefined,
+  "remediation": undefined,
+}
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered PreconditionError 1`] = `
+{
+  "code": "PRECONDITION",
+  "message": "The timelock has not elapsed.",
+  "next": undefined,
+  "remediation": undefined,
+}
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered RevertError 1`] = `
+{
+  "code": "REVERT",
+  "message": "execution reverted",
+  "next": undefined,
+  "remediation": undefined,
+}
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered SaltMiningError 1`] = `
+{
+  "code": "SALT_MINING",
+  "message": "No salt found within the attempt budget.",
+  "next": undefined,
+  "remediation": undefined,
+}
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered StaleProposalError 1`] = `
+{
+  "code": "STALE_PROPOSAL",
+  "message": "The vault nonce has moved past this proposal.",
+  "next": undefined,
+  "remediation": "Cancel this proposal and create a new one against the current module list.",
+}
+`;
+
+exports[`every SDK error class is handled (plan §6 Tier 3) > snapshots the rendered ValidationError 1`] = `
+{
+  "code": "VALIDATION",
+  "message": "Not a usable Quai address.",
+  "next": undefined,
+  "remediation": undefined,
+}
+`;
