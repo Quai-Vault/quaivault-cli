@@ -212,7 +212,6 @@ const NOT_APPLICABLE: Record<string, string> = {
   MAX_MODULES:
     'The module allowlist (Phase 5) validates against the vault’s live module set rather than the static cap.',
   ZERO_ADDRESS: 'Address validity is decided by inspectAddress, which subsumes the zero case.',
-  minimumExpiration: 'Should replace the local floor computation — see KNOWN_GAPS below.',
 };
 
 /** Error classes. The renderer maps these by code, not by class identity. */

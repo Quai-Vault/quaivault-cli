@@ -1,4 +1,4 @@
-import { inspectAddress, MAX_EXECUTION_DELAY } from '@quaivault/sdk';
+import { inspectAddress, minimumExpiration, MAX_EXECUTION_DELAY } from '@quaivault/sdk';
 import type { ProposeResult, DryRunResult, Vault } from '@quaivault/sdk';
 import type { CommandSpec, WritePlan } from '../cli/spec.js';
 import { PreconditionError, UsageError, type AppContext } from '../context/context.js';
@@ -76,7 +76,15 @@ function assertRecipient(address: string, role = 'recipient'): string {
  * The contract rejects `expiration <= block.timestamp + effectiveDelay`, and
  * the effective delay is `max(vaultFloor, userDelay)` — **not** the sum. Get
  * this wrong and the proposal either reverts, or expires before it can ever
- * execute. Computed in exactly one place for that reason.
+ * execute.
+ *
+ * The floor itself comes from the SDK's `minimumExpiration` rather than being
+ * recomputed here. Appendix A's failure was two effective-delay formulas in
+ * two files disagreeing about a contract that uses `max`; a second
+ * implementation in a second package is the same defect with a wider gap.
+ * It also brings the SDK's default margin, which absorbs the time between
+ * building a proposal and it being mined — the thing this function's error
+ * message already told users to leave and did not enforce.
  */
 async function resolveTiming(
   ctx: AppContext,
@@ -96,12 +104,15 @@ async function resolveTiming(
   if (input.expiration) {
     const raw = input.expiration.trim();
     expiration = /^\d{10,}$/.test(raw) ? Number(raw) : ctx.now() + parseDuration(raw);
-    const earliest = ctx.now() + effectiveDelay;
+    // Skew-adjusted `now`, because this is an absolute comparison against a
+    // chain timestamp (§2.1).
+    const earliest = minimumExpiration(effectiveDelay, undefined, ctx.now());
     if (expiration <= earliest) {
       throw new UsageError(
         'That expiry is before the transaction could ever execute.',
         `The effective timelock is ${formatDuration(effectiveDelay)}, so the expiry must be later than ` +
-          `${new Date(earliest * 1000).toISOString()}. Leave a margin for block time.`,
+          `${new Date(earliest * 1000).toISOString()} — which includes a margin for the ` +
+          'time between proposing and being mined.',
       );
     }
   }
