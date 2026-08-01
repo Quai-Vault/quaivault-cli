@@ -42,6 +42,54 @@ export default tseslint.config(
     rules: { 'no-console': 'off' },
   },
   {
+    // Plan §1/§5.2: the TUI can do nothing the one-shot surface cannot, and
+    // that rule is worth nothing as a convention. `tui/` holds the pure
+    // reducer and the spawned-signer boundary; it goes through the
+    // dispatcher and `format/` for everything else.
+    //
+    // `allowTypeImports` is the meaningful line. A type import erases at
+    // build time and cannot call anything, so `import type { Affordance }`
+    // is the reducer describing the shape it reduces over. A *value* import
+    // would let the TUI reach the chain directly, and then "signs by
+    // delegation" becomes something you have to check by reading rather
+    // than something the build enforces.
+    files: ['src/tui/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@quaivault/sdk',
+              allowTypeImports: true,
+              message:
+                'tui/ must not call the SDK. Route through the dispatcher; the TUI signs by spawning a one-shot process (§4.4). Type-only imports are fine.',
+            },
+            {
+              name: 'quais',
+              allowTypeImports: true,
+              message:
+                'tui/ must never touch key material or a provider. The spawned signer owns that (§4.4).',
+            },
+          ],
+          patterns: [
+            {
+              group: ['**/commands/*', '../commands/*'],
+              allowTypeImports: true,
+              message:
+                'tui/ must not reach into a command implementation. Go through the dispatcher so the TUI cannot acquire a capability the one-shot surface lacks.',
+            },
+            {
+              group: ['**/keys/*', '../keys/*'],
+              message:
+                'The TUI holds no key. kill -USR1 on a long-lived process is a full heap read, which is the entire reason for the spawned-signer design (§4.4).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // CommandSpec.run/plan/commit are declared to return a Promise, so `async`
     // is the correct spelling even where a particular command has nothing to
     // await. Forcing `Promise.resolve` wrappers would be noise, not safety.

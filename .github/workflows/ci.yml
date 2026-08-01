@@ -70,6 +70,20 @@ jobs:
           ./node_modules/.bin/qv --version
           ./node_modules/.bin/quaivault --help >/dev/null
           ./node_modules/.bin/qv addr check 0x0081f4e8a9b0c1d2e3f405162738495a6b7c8d78 | grep -q "NOT usable"
+      # A unit test can check the generated text; only a shell can check that
+      # it parses. Both bash and zsh ship on the runner.
+      - name: generated completion scripts parse in their shells
+        run: |
+          node dist/qv.js completion bash > /tmp/qv.bash
+          node dist/qv.js completion zsh  > /tmp/_qv
+          node dist/qv.js completion fish > /tmp/qv.fish
+          bash -n /tmp/qv.bash
+          zsh -n /tmp/_qv
+          # Sourcing it and driving one completion catches a script that
+          # parses but produces nothing.
+          bash -c 'source /tmp/qv.bash
+            COMP_WORDS=(qv tx a); COMP_CWORD=2; _qv_complete
+            test "${COMPREPLY[0]}" = "approve" || { echo "completion produced: ${COMPREPLY[*]}"; exit 1; }'
       - name: no unexpected files in the tarball
         run: |
           npm pack --dry-run --json | node -e "

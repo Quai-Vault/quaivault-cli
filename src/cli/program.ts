@@ -5,6 +5,7 @@ import { REGISTRY } from './registry.js';
 import { commandId, type CommandSpec } from './spec.js';
 import { ExitCode, type ExitCodeValue } from './exit.js';
 import { buildSchema } from './schema.js';
+import { completionScript, SHELLS, type Shell } from './completion.js';
 
 declare const __CLI_VERSION__: string;
 export const CLI_VERSION = typeof __CLI_VERSION__ === 'string' ? __CLI_VERSION__ : '0.0.0-dev';
@@ -132,6 +133,23 @@ export function buildProgram(exitRef: { code: ExitCodeValue }): Command {
     .description('emit the machine-readable command and output schema')
     .action(() => {
       process.stdout.write(`${JSON.stringify(buildSchema(CLI_VERSION), null, 2)}\n`);
+    });
+
+  // Not a CommandSpec: it emits a shell script to stdout and touches no
+  // config, no client and no keystore, so routing it through the dispatcher
+  // would mean building a context it has no use for.
+  program
+    .command('completion')
+    .argument('<shell>', `one of: ${SHELLS.join(', ')}`)
+    .description('Emit a shell completion script (add to your shell config)')
+    .action((shell: string) => {
+      if (!(SHELLS as readonly string[]).includes(shell)) {
+        process.stderr.write(`error: unknown shell ${JSON.stringify(shell)}\n`);
+        process.stderr.write(`       supported: ${SHELLS.join(', ')}\n`);
+        exitRef.code = ExitCode.Usage;
+        return;
+      }
+      process.stdout.write(completionScript(shell as Shell));
     });
 
   for (const spec of REGISTRY) attach(program, spec, exitRef);
