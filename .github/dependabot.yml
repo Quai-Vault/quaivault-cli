@@ -1,0 +1,69 @@
+---
+# Plan §2.3. Exact pins create an obligation: a pin nobody maintains decays
+# into "stuck on a known-vulnerable version". This is how that obligation is
+# discharged, and it is the only mechanism that moves a pin here — nothing in
+# this repo floats.
+#
+# What Dependabot can and cannot reach, stated plainly so nobody assumes more
+# coverage than exists:
+#
+#   @quaivault/sdk    direct, pinned exactly. R1 says six releases in two days
+#                     with three breaking. A weekly PR is the "who reads the
+#                     changelog" mechanism §8 R1 asks for; the daily
+#                     sdk-contract job (ci.yml) is the early warning.
+#   quais             direct, pinned exactly, and constrained by the SDK's
+#                     peerDependencies allowlist. A bump outside that range
+#                     fails CI's single-copy/in-range check rather than
+#                     merging quietly.
+#   @supabase/*       NOT reachable. The SDK pins both at 2.111.0 as direct
+#                     dependencies of its own, so they move when the SDK
+#                     moves and not before. The group below exists because
+#                     Dependabot still raises lockfile-level security bumps
+#                     for indirect packages, and those two release in
+#                     lockstep — one PR, not two that fight.
+#   zod               indirect, ^3.25.76. Materially lower risk: zod's active
+#                     line is 4.x so 3.x is effectively frozen (§9).
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+    open-pull-requests-limit: 10
+    labels: [dependencies]
+    versioning-strategy: increase
+    groups:
+      # Released in lockstep by Supabase; a split PR pair would conflict on
+      # the lockfile every time.
+      supabase:
+        patterns:
+          - '@supabase/*'
+      # One dependency family, not two (§3.6). @inquirer/password and
+      # @inquirer/prompts share a core and must move together.
+      inquirer:
+        patterns:
+          - '@inquirer/*'
+      # Toolchain churn is noise at the PR level; batch it.
+      dev-tooling:
+        dependency-type: development
+        patterns:
+          - '*'
+
+  # Every action in this repo is SHA-pinned (Phase 0), which means none of
+  # them ever move on their own. Without this block the pins silently rot.
+  # test/unit/workflows.test.ts enforces that they stay SHA-pinned when they
+  # do move.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+    labels: [dependencies, ci]
+    groups:
+      actions:
+        patterns:
+          - '*'
