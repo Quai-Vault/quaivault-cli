@@ -202,6 +202,29 @@ bob = "0x00a1…"
 `NO_COLOR`, `FORCE_COLOR` and `--color` all work. Output to a pipe drops all chrome:
 data goes to stdout, warnings and hints to stderr.
 
+## Shell completion
+
+```sh
+qv completion bash > ~/.local/share/bash-completion/completions/qv
+qv completion zsh  > ~/.zfunc/_qv         # ensure ~/.zfunc is on $fpath
+qv completion fish > ~/.config/fish/completions/qv.fish
+```
+
+The script is generated from the command registry, so it never goes stale. It
+is also deliberately static: it contains no vault aliases, contact names or
+paths, because a completion script lives in a dotfile that ends up in backups
+and dotfile repositories.
+
+## Further reading
+
+- [`docs/agent-contract.md`](docs/agent-contract.md) — the full
+  `{exitCode, changed, retryable}` table, the `verify` block, and how to bind
+  an agent to bytes rather than to prose.
+- [`docs/r4-ipfs-measurement.md`](docs/r4-ipfs-measurement.md) — why on-chain
+  ABI resolution is measured and deferred rather than built.
+- [`SECURITY.md`](SECURITY.md) — what this tool protects against, what it does
+  not, and every irreversible action with its guard.
+
 ## Development
 
 ```bash

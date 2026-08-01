@@ -39,10 +39,11 @@ async function qv(
   try {
     const { stdout, stderr } = await run(process.execPath, [BIN, ...args], {
       env,
+      encoding: 'utf8',
       timeout: 90_000,
       maxBuffer: 16 * 1024 * 1024,
       ...(opts.stdin === 'empty' ? { input: '' } : {}),
-    } as never);
+    });
     return { stdout, stderr, code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };

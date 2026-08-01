@@ -5,7 +5,11 @@ internal consistency, security, architecture, product). Revision 2 had accumulat
 damage — duplicate section numbers, orphaned cross-references, scope added in one section and
 propagated to none — that patching it again was the wrong move.
 
-Status: **not started.** This directory contains only this file and is not a git repository.
+Status: **Phases 0–9 implemented**, published at `Quai-Vault/quaivault-cli`. Phase 10 is
+measured and deferred — see `docs/r4-ipfs-measurement.md`. This file is kept as the design
+record it was written to be: where reality has since diverged from it, the divergence is
+noted inline rather than edited away, because a plan silently rewritten to match the code
+stops being a check on the code.
 
 Claims marked *(verified)* were checked against source or a live system on 2026-07-29. Claims
 without it are reasoning, not fact — the distinction is deliberate and load-bearing.
@@ -806,12 +810,31 @@ security-critical and single-authored is narrower: the **policy layer** (§3.4),
 Those three are where review effort should concentrate, and they are small enough to read end to
 end. The Phase 2 security gate is the mechanism: blocking CI tests, not a review convention.
 
-**Open:**
+**Closed 2026-08-01:**
 
-1. **Does Phase 10 exist?** Gated on the R4 measurement — an afternoon's work that decides whether
-   a 3–4 week feature is worth building. Not needed until Phase 4 is done.
+1. ~~**Does Phase 10 exist?**~~ **Measured; answer is "not as scoped."** Against the entire
+   mainnet proposal history, 100% of contract targets carry an IPFS CID and 93% resolve, median
+   41 ms — so R4's premise about IPFS unreliability does not survive contact with the data. But
+   only **3** targets are contracts the SDK does not already decode, and a month of resolver
+   machinery to cover three addresses is a bad trade when §7.1 already renders their full
+   calldata. Full result, method, and the smaller variant that would be worth building:
+   `docs/r4-ipfs-measurement.md`. Re-run with `node scripts/measure-ipfs.mjs`.
 *(The `quais` peer-dependency question closed itself: SDK 0.6.0 moved it to a `peerDependency`
 allowlist. Our §5.4 lockstep coupling is gone; see there for the verified install matrix.)*
+
+---
+
+## Appendix B — Where the build diverged from this plan
+
+Recorded rather than edited away (see the status line at the top).
+
+| § | Plan said | Reality |
+|---|---|---|
+| §3.5 | Build the signer with `new BaseWallet(key, provider)` | `quais` exports **`Wallet`**, not `BaseWallet`. `src/keys/signer.ts` and `scripts/fixture-vault.mjs` both use `Wallet`; the property the plan cared about — construct from bytes, never `connect({ privateKey })` — holds. |
+| §4.1 | `changed: "unknown"` is required for broadcast-but-unconfirmed | The tri-state exists in the type and is **currently unreachable**: every SDK write awaits its receipt, so a call either returns a hash or throws before one exists. Documented in `docs/agent-contract.md` rather than faked. |
+| §4.4 | TUI framework: `ink` | The TUI is hand-rolled over a pure reducer with no `ink` dependency. Every property the plan wanted holds — keyless, reducer-tested, no full-frame snapshots — at 37 fewer packages. Worth revisiting only if the TUI grows. |
+| §7 | "`operation` (call vs delegatecall)" in the disclosure | The vault's transaction struct has **no operation field**, so a top-level transaction is structurally always a call. Delegatecall exists only inside a MultiSend payload, which makes "batch recurses" the whole of the delegatecall gate rather than an extra case. See `src/abi/batch.ts`. |
+| §10 | Reimplement the CBOR trailer parse for Phase 10 | Done early, in `scripts/measure-ipfs.mjs`, because the R4 measurement needed it. ~40 lines, no Sourcify dependency, as specified. |
 
 ---
 

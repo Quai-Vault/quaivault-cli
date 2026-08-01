@@ -239,7 +239,13 @@ function makeProposeCommand<I extends ProposeCommon>(cfg: {
         };
       }
       const proposed = result;
-      await vault.waitForIndexer().catch(() => undefined);
+      // Same rule as the lifecycle writes (§4.1): the proposal landed, so
+      // exit 0, but say that the indexer is behind rather than leaving the
+      // next read looking mysteriously empty.
+      const reached = await vault
+        .waitForIndexer()
+        .then((r) => r.reached)
+        .catch(() => false);
       return {
         data: {
           address: planned.disclosure.address,
@@ -254,6 +260,12 @@ function makeProposeCommand<I extends ProposeCommon>(cfg: {
         retryable: false,
         steps: [{ name: 'propose', status: 'ok', chainTxHash: proposed.chainTxHash }],
         next: [`qv tx show ${planned.disclosure.address} ${proposed.txHash.slice(0, 10)}`],
+        warnings: reached
+          ? undefined
+          : [
+              'The proposal landed on chain but the indexer has not caught up yet. ' +
+                '`qv tx show` may lag by a few seconds; do not re-run this command.',
+            ],
       };
     },
 

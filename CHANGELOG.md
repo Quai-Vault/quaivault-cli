@@ -8,6 +8,45 @@ version is `0.x`, minor bumps may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Batch disclosure recursion** (§7). Every sub-call of a MultiSend batch is
+  now disclosed with its own recipient, value, decode provenance and — when
+  the ABI is unknown — full raw calldata. `--json` carries the same data, and
+  every sub-call summary joins the `untrusted` pointer list.
+- **`qv completion bash|zsh|fish`**, generated from the command registry and
+  deliberately static: it never bakes your aliases or contacts into a dotfile.
+- **`ResultStore` + `ChangeFeed`**, so `qv tui` follows `watchVault` instead of
+  only refreshing when you press `r`.
+- **Channel budget** reported by `qv doctor` and in the TUI status line —
+  Realtime caps concurrent channels, and a screen that looks live but is not is
+  worse than one that says so.
+- **`qv doctor` env report** — which `QUAIVAULT_*` variables are set, by name
+  only, never by value.
+- `docs/agent-contract.md`, the full `{exitCode, changed, retryable}` table.
+- `docs/r4-ipfs-measurement.md` and `scripts/measure-ipfs.mjs`.
+- An irreversible-action table in `SECURITY.md`.
+
+### Fixed
+
+- **The delegatecall gate never fired.** `isDelegatecall` read an `operation`
+  field that no `VaultTransaction` has ever carried, so it returned `false` for
+  every transaction and the disclosure printed `Operation: call`
+  unconditionally. A delegatecall can only exist inside a MultiSend payload, so
+  the fix and the batch-recursion feature above are one change.
+- **A batch payload the SDK's decoder silently truncates is now refused.**
+  `decodeMultiSendPayload` drops a malformed entry, an overrunning length field
+  and trailing bytes without erroring, any of which means the bytes the vault
+  hands to MultiSend are not the bytes we described. The payload is now
+  accounted for byte-exactly and a remainder fails closed.
+- **`verify.dataHash` was `null`** in `qv tx show --json`, which is the value
+  `--expect-data-hash` compares against.
+- **Expiration validation** now uses the SDK's `minimumExpiration` rather than
+  recomputing the floor locally, which also applies the block-time margin the
+  error message already told users to leave.
+- `qv tx approve` and `qv propose *` now report indexer lag after a successful
+  write instead of swallowing it, matching `qv tx execute`.
+
 ## [0.1.0]
 
 First release. Built against `@quaivault/sdk` 0.6.0, pinned exactly.

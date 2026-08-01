@@ -326,13 +326,21 @@ export const txApproveCommand: CommandSpec<LifecycleInput, WriteResult, Disclosu
     }
 
     const { chainTxHash } = await vault.approve(tx.hash);
-    await vault.waitForIndexer().catch(() => undefined);
+    // §4.1: an indexer stall after a successful write exits 0 — exiting
+    // non-zero invites a retry of a multisig transaction that already
+    // succeeded. But it must still be *said*, or the next `qv tx show`
+    // looks stale for no visible reason.
+    const reached = await vault
+      .waitForIndexer()
+      .then((r) => r.reached)
+      .catch(() => false);
     return {
       data: { hash: tx.hash, address, chainTxHash },
       changed: true,
       retryable: false,
       steps: [{ name: 'approve', status: 'ok', chainTxHash }],
       next: [`qv tx show ${address} ${tx.hash.slice(0, 10)}`],
+      warnings: reached ? undefined : ['The write landed on chain but the indexer has not caught up yet. `qv tx show` may lag by a few seconds; do not re-run this command.'],
     };
   },
 
