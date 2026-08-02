@@ -40,8 +40,9 @@
  *
  * Preflight reports whether the head is advancing but never refuses on it —
  * the head number is zone-scoped and writes land fine against a head that
- * looks static. Confirmations on Orchard are slow; the full run takes many
- * minutes.
+ * looks static. `--skip-head-watch` skips that report; it overrides no safety
+ * check, because there is none. Confirmations on Orchard are slow and the
+ * full run takes many minutes.
  *
  * `--preflight` is runnable with no key at all and verifies everything that
  * does not require one: network reachable, factory registered and
@@ -56,7 +57,8 @@ import { getBytes, SigningKey, Wallet, getAddress } from 'quais';
 
 const argv = process.argv.slice(2);
 const PREFLIGHT = argv.includes('--preflight');
-const ASSUME_LIVE = argv.includes('--assume-live');
+/** Skip the informational head watch. Overrides no safety check — there is none. */
+const SKIP_HEAD_WATCH = argv.includes('--skip-head-watch') || argv.includes('--assume-live');
 const OUT = 'test/e2e/fixture-vaults.json';
 
 /**
@@ -151,8 +153,8 @@ async function preflight() {
   // 2026-08-02: head stuck at 1627459 for over 21 hours while mainnet
   // advanced normally. Reachability checks cannot see it.
   log(`orchard rpc        block ${await qv.provider.getBlockNumber()}`);
-  if (ASSUME_LIVE) {
-    log('                   head watch skipped (--assume-live)');
+  if (SKIP_HEAD_WATCH) {
+    log('                   head watch skipped');
   } else {
     const seconds = await awaitBlock(qv);
     log(

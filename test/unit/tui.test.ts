@@ -440,7 +440,7 @@ describe('the cursor follows the transaction, not the index', () => {
   });
 
   it('anchors the history pane independently of the inbox', () => {
-    let s = { ...initialState(10), pane: 'history' as const };
+    let s: TuiState = { ...initialState(10), pane: 'history' };
     s = reduce(s, { type: 'history', rows: [rowFor(H(1)), rowFor(H(2))], at: 0 } as never);
     s = press(s, 'j');
     expect(selectedRow(s)?.tx.hash).toBe(H(2));
