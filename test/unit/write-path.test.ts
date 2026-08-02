@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { keccak256 } from 'quais';
 import { ExitCode } from '../../src/cli/exit.js';
-import { confirm } from '../../src/cli/confirm.js';
+import { confirm, matchesTyped } from '../../src/cli/confirm.js';
 import { checkPolicy, type Policy } from '../../src/context/policy.js';
 import {
   txApproveCommand,
@@ -326,5 +326,43 @@ describe('the batch gate — the only delegatecall detection that exists', () =>
     const planned = await txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort);
     expect(planned.disclosure.unverified).toBe(false);
     expect(planned.disclosure.batch).toBeNull();
+  });
+});
+
+describe('typed confirmations (plan §3.6, §8 R8)', () => {
+  const ADDRESS = '0x0006506bDE7140b85DED58a40D7444F84cde4821';
+
+  it('accepts any EIP-55 spelling of the same address', () => {
+    // Found with a real key: `qv key import` printed the checksummed form and
+    // `qv key rm` demanded the lowercase one, refusing the address it had
+    // just shown the user. Casing is a checksum, not identity.
+    for (const given of [ADDRESS, ADDRESS.toLowerCase(), ADDRESS.toUpperCase().replace('0X', '0x')]) {
+      expect(matchesTyped(given, ADDRESS.toLowerCase(), { foldCase: true }), given).toBe(true);
+    }
+  });
+
+  it('still refuses a different address', () => {
+    expect(matchesTyped('0x00deadbeefdeadbeefdeadbeefdeadbeefdeadbe', ADDRESS, { foldCase: true })).toBe(
+      false,
+    );
+    // One character off must not pass.
+    expect(matchesTyped(ADDRESS.slice(0, -1) + '2', ADDRESS, { foldCase: true })).toBe(false);
+  });
+
+  it('tolerates surrounding whitespace from a paste', () => {
+    expect(matchesTyped(`  ${ADDRESS}  `, ADDRESS, { foldCase: true })).toBe(true);
+  });
+
+  it('keeps alias confirmation case-sensitive', () => {
+    // `qv recovery execute` types a vault alias, and two aliases differing
+    // only by case can both exist — folding would make the confirmation
+    // ambiguous about which vault is being recovered.
+    expect(matchesTyped('treasury', 'treasury')).toBe(true);
+    expect(matchesTyped('TREASURY', 'treasury')).toBe(false);
+  });
+
+  it('refuses an empty answer under either mode', () => {
+    expect(matchesTyped('', ADDRESS, { foldCase: true })).toBe(false);
+    expect(matchesTyped('   ', 'treasury')).toBe(false);
   });
 });

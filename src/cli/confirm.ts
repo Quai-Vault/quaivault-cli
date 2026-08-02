@@ -70,14 +70,46 @@ export async function promptYesNo(question: string): Promise<boolean> {
   }
 }
 
+/**
+ * Does a typed confirmation match?
+ *
+ * Pure and exported so the comparison is testable without a terminal — the
+ * prompt itself reads from `/dev/tty` and cannot be driven from a unit test.
+ *
+ * `foldCase` is for **addresses**, where EIP-55 casing is a *checksum* rather
+ * than identity, so two spellings are the same value. Comparing them
+ * case-sensitively rejects the checksummed form the tool itself printed:
+ * observed with a real key, `qv key import` reported `0x0006506bDE71…` while
+ * `qv key rm` demanded `0x0006506bde71…` and refused the address it had just
+ * shown the user.
+ *
+ * **Aliases stay exact on purpose.** An alias is a name the user chose, and
+ * `ops` and `OPS` can both exist in config, so folding them would make the
+ * confirmation ambiguous about which one it is confirming — on
+ * `qv recovery execute`, the most destructive command in the product.
+ */
+export function matchesTyped(
+  given: string,
+  expected: string,
+  opts: { foldCase?: boolean } = {},
+): boolean {
+  const trimmed = given.trim();
+  return opts.foldCase
+    ? trimmed.toLowerCase() === expected.trim().toLowerCase()
+    : trimmed === expected;
+}
+
 /** Typed confirmation for the highest-consequence actions. */
-export async function promptTyped(question: string, expected: string): Promise<boolean> {
+export async function promptTyped(
+  question: string,
+  expected: string,
+  opts: { foldCase?: boolean } = {},
+): Promise<boolean> {
   const input = process.platform === 'win32' ? process.stdin : createReadStream('/dev/tty');
   const output = process.platform === 'win32' ? process.stderr : createWriteStream('/dev/tty');
   const rl = createInterface({ input, output, terminal: true });
   try {
-    const answer = await rl.question(question);
-    return answer.trim() === expected;
+    return matchesTyped(await rl.question(question), expected, opts);
   } finally {
     rl.close();
     if (input !== process.stdin) (input as { destroy: () => void }).destroy();

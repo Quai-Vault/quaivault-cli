@@ -53,6 +53,9 @@ const argv = process.argv.slice(2);
 const PREFLIGHT = argv.includes('--preflight');
 const OUT = 'test/e2e/fixture-vaults.json';
 
+/** Long enough to see a block at Orchard's cadence, short enough to wait on. */
+const LIVENESS_WINDOW_MS = 45_000;
+
 /** A well-formed Quai address nobody holds the key to, for the held vault. */
 const CO_OWNER = '0x0071111111111111111111111111111111111111';
 
@@ -94,8 +97,27 @@ async function preflight() {
   const health = await qv.indexerHealth().catch((e) => ({ available: false, error: e.message }));
   log(`indexer            ${health.available ? 'available' : `UNAVAILABLE (${health.error ?? '?'})`}`);
 
+  // **Liveness, not just reachability.** A stalled chain answers every read
+  // perfectly and mines nothing, so `create()` broadcasts and then waits on a
+  // receipt that never arrives — hanging this script partway through a
+  // seven-step deployment with vaults half-created. Observed on Orchard
+  // 2026-08-02: head stuck at 1627459 for over 21 hours while mainnet
+  // advanced normally. Reachability checks cannot see it.
   const block = await qv.provider.getBlockNumber();
-  log(`orchard rpc        block ${block}`);
+  process.stdout.write(`orchard rpc        block ${block}, checking liveness…`);
+  await new Promise((r) => setTimeout(r, LIVENESS_WINDOW_MS));
+  const later = await qv.provider.getBlockNumber();
+  const advanced = later > block;
+  process.stdout.write(`\rorchard rpc        block ${block} → ${later} `);
+  log(advanced ? `(+${later - block} in ${LIVENESS_WINDOW_MS / 1000}s)` : '— NOT ADVANCING');
+  if (!advanced) {
+    log('');
+    log('The chain is not producing blocks. Refusing to deploy: every write');
+    log('would broadcast and then wait forever on a receipt, leaving vaults');
+    log('half-created. Wait for Orchard to recover and re-run.');
+    process.exitCode = 1;
+    return;
+  }
 
   const verify = await qv.factory.verify();
   log(`factory            ${verify.valid ? 'consistent' : `INVALID: ${verify.errors.join('; ')}`}`);
@@ -130,6 +152,17 @@ async function deploy() {
 
   const balance = await qv.provider.getBalance(me);
   if (balance === 0n) throw new Error(`${me} holds no Orchard QUAI — fund it first`);
+
+  // The same liveness gate as --preflight. A caller who skipped preflight
+  // must not be able to start a multi-step deployment into a stalled chain.
+  const head = await qv.provider.getBlockNumber();
+  await new Promise((r) => setTimeout(r, LIVENESS_WINDOW_MS));
+  if ((await qv.provider.getBlockNumber()) <= head) {
+    throw new Error(
+      `the chain is not producing blocks (head stuck at ${head}) — ` +
+        'every write would wait forever on a receipt. Run --preflight and retry later.',
+    );
+  }
   log(`deploying as ${me} (${balance} wei)\n`);
 
   log('creating the held vault (threshold 2, quorum unreachable)…');

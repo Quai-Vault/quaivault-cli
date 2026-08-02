@@ -220,7 +220,9 @@ export const keyRmCommand: CommandSpec<{ name: string }, { name: string; removed
       }
       ctx.io.err(`About to permanently delete ${name} (${entry.address}).`);
       ctx.io.err('If this is your only copy, the signing seat is gone for good.');
-      const ok = await promptTyped(`Type the address to confirm: `, entry.address);
+      const ok = await promptTyped(`Type the address to confirm: `, entry.address, {
+        foldCase: true,
+      });
       if (!ok) throw new UsageError('Address did not match. Nothing was deleted.');
     }
     removeKey(name);
