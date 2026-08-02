@@ -38,6 +38,11 @@
  *   node scripts/fixture-vault.mjs --preflight       # checks, deploys nothing
  *   node scripts/fixture-vault.mjs
  *
+ * Both wait for one block before doing anything, so a stalled chain is caught
+ * before a half-finished deployment rather than after. `--assume-live` skips
+ * that when you know the chain is merely slow; QUAIVAULT_LIVENESS_TIMEOUT_MS
+ * raises the patience instead of removing the check.
+ *
  * `--preflight` is runnable with no key at all and verifies everything that
  * does not require one: network reachable, factory registered and
  * self-consistent, indexer live. Run it first — a failed deployment halfway
@@ -51,10 +56,46 @@ import { getBytes, SigningKey, Wallet, getAddress } from 'quais';
 
 const argv = process.argv.slice(2);
 const PREFLIGHT = argv.includes('--preflight');
+const ASSUME_LIVE = argv.includes('--assume-live');
 const OUT = 'test/e2e/fixture-vaults.json';
 
-/** Long enough to see a block at Orchard's cadence, short enough to wait on. */
-const LIVENESS_WINDOW_MS = 45_000;
+/**
+ * How long to wait for a single block before giving up.
+ *
+ * Generous on purpose. A short window conflates "stalled" with "slower than
+ * my patience", and a testnet is entitled to be slow — an earlier version of
+ * this check demanded movement within 45s, which would refuse to deploy on
+ * any chain whose block time exceeds that. All we actually need to know is
+ * whether a transaction will ever be mined, so waiting minutes is fine; the
+ * deployment itself takes longer than this.
+ */
+const LIVENESS_TIMEOUT_MS = Number(process.env.QUAIVAULT_LIVENESS_TIMEOUT_MS ?? 300_000);
+const LIVENESS_POLL_MS = 15_000;
+
+/**
+ * Wait for the head to advance by one block. Returns the observed seconds, or
+ * `null` if nothing was mined within the timeout.
+ *
+ * Reports progress deliberately: a silent five-minute wait is
+ * indistinguishable from a hang, which is the confusion this exists to end.
+ */
+async function awaitBlock(qv) {
+  const start = await qv.provider.getBlockNumber();
+  const t0 = Date.now();
+  while (Date.now() - t0 < LIVENESS_TIMEOUT_MS) {
+    const waited = Math.round((Date.now() - t0) / 1000);
+    process.stdout.write(`\r  waiting for a block (head ${start}, ${waited}s)…    `);
+    await new Promise((r) => setTimeout(r, LIVENESS_POLL_MS));
+    const now = await qv.provider.getBlockNumber().catch(() => start);
+    if (now > start) {
+      const took = Math.round((Date.now() - t0) / 1000);
+      process.stdout.write(`\r  block ${now} mined after ${took}s${' '.repeat(24)}\n`);
+      return took;
+    }
+  }
+  process.stdout.write('\r' + ' '.repeat(72) + '\r');
+  return null;
+}
 
 /** A well-formed Quai address nobody holds the key to, for the held vault. */
 const CO_OWNER = '0x0071111111111111111111111111111111111111';
@@ -103,20 +144,23 @@ async function preflight() {
   // seven-step deployment with vaults half-created. Observed on Orchard
   // 2026-08-02: head stuck at 1627459 for over 21 hours while mainnet
   // advanced normally. Reachability checks cannot see it.
-  const block = await qv.provider.getBlockNumber();
-  process.stdout.write(`orchard rpc        block ${block}, checking liveness…`);
-  await new Promise((r) => setTimeout(r, LIVENESS_WINDOW_MS));
-  const later = await qv.provider.getBlockNumber();
-  const advanced = later > block;
-  process.stdout.write(`\rorchard rpc        block ${block} → ${later} `);
-  log(advanced ? `(+${later - block} in ${LIVENESS_WINDOW_MS / 1000}s)` : '— NOT ADVANCING');
-  if (!advanced) {
-    log('');
-    log('The chain is not producing blocks. Refusing to deploy: every write');
-    log('would broadcast and then wait forever on a receipt, leaving vaults');
-    log('half-created. Wait for Orchard to recover and re-run.');
-    process.exitCode = 1;
-    return;
+  log(`orchard rpc        block ${await qv.provider.getBlockNumber()}`);
+  if (ASSUME_LIVE) {
+    log('                   liveness check skipped (--assume-live)');
+  } else {
+    const seconds = await awaitBlock(qv);
+    if (seconds === null) {
+      log('');
+      log(`No block was mined in ${LIVENESS_TIMEOUT_MS / 1000}s. Refusing to deploy: every`);
+      log('write would broadcast and then wait on a receipt that may never come,');
+      log('leaving vaults half-created.');
+      log('');
+      log('If the chain is merely slow rather than stalled, re-run with --assume-live,');
+      log('or raise QUAIVAULT_LIVENESS_TIMEOUT_MS to wait longer.');
+      process.exitCode = 1;
+      return;
+    }
+    log(`                   liveness ok, ~${seconds}s for a block`);
   }
 
   const verify = await qv.factory.verify();
@@ -155,12 +199,10 @@ async function deploy() {
 
   // The same liveness gate as --preflight. A caller who skipped preflight
   // must not be able to start a multi-step deployment into a stalled chain.
-  const head = await qv.provider.getBlockNumber();
-  await new Promise((r) => setTimeout(r, LIVENESS_WINDOW_MS));
-  if ((await qv.provider.getBlockNumber()) <= head) {
+  if (!ASSUME_LIVE && (await awaitBlock(qv)) === null) {
     throw new Error(
-      `the chain is not producing blocks (head stuck at ${head}) — ` +
-        'every write would wait forever on a receipt. Run --preflight and retry later.',
+      `no block mined in ${LIVENESS_TIMEOUT_MS / 1000}s — every write would wait on a receipt ` +
+        'that may never come. Re-run with --assume-live if the chain is merely slow.',
     );
   }
   log(`deploying as ${me} (${balance} wei)\n`);
