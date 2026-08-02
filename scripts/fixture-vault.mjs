@@ -51,7 +51,7 @@
  *
  * Writes `test/e2e/fixture-vaults.json`, which the e2e suite reads.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { connect, testnet, MAX_EXECUTION_DELAY, minimumExpiration } from '@quaivault/sdk';
 import { getBytes, SigningKey, Wallet, getAddress } from 'quais';
 
@@ -59,7 +59,16 @@ const argv = process.argv.slice(2);
 const PREFLIGHT = argv.includes('--preflight');
 /** Skip the informational head watch. Overrides no safety check — there is none. */
 const SKIP_HEAD_WATCH = argv.includes('--skip-head-watch') || argv.includes('--assume-live');
+/**
+ * Reuse the vaults in an existing fixture and only attempt the states it is
+ * missing. A full run costs twenty-plus minutes of Orchard confirmations, so
+ * redeploying two vaults to retry one proposal is a poor trade.
+ */
+const REPAIR = argv.includes('--repair');
 const OUT = 'test/e2e/fixture-vaults.json';
+
+/** The seven lifecycle states a complete fixture holds. */
+const SEVEN = ['pending', 'cancelled', 'expired', 'ready', 'timelocked', 'executed', 'failed'];
 
 /**
  * How long to watch the head before reporting on it.
@@ -120,8 +129,15 @@ const CO_OWNER = '0x0071111111111111111111111111111111111111';
  *
  * So the floor comes from the SDK, exactly as `qv propose` computes it, and
  * this is only the cushion added to it.
+ *
+ * The cushion is large because the contract checks against `block.timestamp`
+ * **at mining time**, not at build time, and an Orchard confirmation takes
+ * minutes. A second failure — "requires an expiration after 1785704114", 170s
+ * short — came from computing this against a `now` captured 530 seconds
+ * earlier, before two vault creations and two funding transfers. Always
+ * compute it immediately before proposing, never from a stashed clock.
  */
-const EXPIRY_MARGIN_SECONDS = 60;
+const EXPIRY_MARGIN_SECONDS = 600;
 /** Long enough that `timelocked` is still timelocked when the script ends. */
 const TIMELOCK_SECONDS = 3600;
 
@@ -214,6 +230,12 @@ async function deploy() {
   const qv = connect({ network: testnet, useEnv: false, signer: wallet });
   const me = wallet.address;
 
+  const existing =
+    REPAIR && existsSync(OUT) ? JSON.parse(readFileSync(OUT, 'utf8')) : null;
+  if (REPAIR && !existing) {
+    throw new Error(`--repair needs an existing ${OUT}; run without it first`);
+  }
+
   const balance = await qv.provider.getBalance(me);
   if (balance === 0n) throw new Error(`${me} holds no Orchard QUAI — fund it first`);
 
@@ -221,24 +243,34 @@ async function deploy() {
   // blocking a real deployment on it would be worse than a slow one.
   log(`deploying as ${me} (${balance} wei)\n`);
 
-  log('creating the held vault (threshold 2, quorum unreachable)…');
-  const held = await qv.factory.create({ owners: [me, getAddress(CO_OWNER)], threshold: 2 });
-  log(`  ${held.address}  ${held.chainTxHash}`);
+  let held;
+  let solo;
+  if (existing) {
+    held = { address: existing.vaults.held };
+    solo = { address: existing.vaults.solo };
+    log(`reusing held ${held.address}`);
+    log(`reusing solo ${solo.address}`);
+    log(`missing states: ${SEVEN.filter((k) => !existing.states[k]).join(', ') || 'none'}\n`);
+  } else {
+    log('creating the held vault (threshold 2, quorum unreachable)…');
+    held = await qv.factory.create({ owners: [me, getAddress(CO_OWNER)], threshold: 2 });
+    log(`  ${held.address}  ${held.chainTxHash}`);
 
-  log('creating the solo vault (threshold 1, you are quorum)…');
-  const solo = await qv.factory.create({ owners: [me], threshold: 1 });
-  log(`  ${solo.address}  ${solo.chainTxHash}\n`);
+    log('creating the solo vault (threshold 1, you are quorum)…');
+    solo = await qv.factory.create({ owners: [me], threshold: 1 });
+    log(`  ${solo.address}  ${solo.chainTxHash}\n`);
+  }
 
   const heldVault = qv.vault(held.address);
   const soloVault = qv.vault(solo.address);
-  const states = {};
+  const states = { ...(existing?.states ?? {}) };
 
   // Both vaults need a little balance to propose value transfers against.
   // `from` is required. Quai is sharded, so quais will not infer the
   // originating zone for a plain value transfer and throws
   // `unsupported addressable value (argument="target", value=null)` without
   // it — an error that names neither `from` nor the transaction.
-  log('funding both vaults…');
+  log(existing ? 'topping both vaults up…' : 'funding both vaults…');
   for (const address of [held.address, solo.address]) {
     const tx = await wallet.sendTransaction({
       from: me,
@@ -249,13 +281,15 @@ async function deploy() {
     log(`  ${address}  ${tx.hash}`);
   }
 
-  const now = Math.floor(Date.now() / 1000);
-
   // Each state is independent. A single failure must not discard the states
   // already created — this run costs twenty minutes of confirmations, and a
   // partial fixture is far more useful than none.
   const failures = [];
   const step = async (name, fn) => {
+    if (states[name]) {
+      log(`  ${name.padEnd(10)} ${states[name]}  (already present)`);
+      return;
+    }
     try {
       states[name] = await fn();
       log(`  ${name.padEnd(10)} ${states[name]}`);
@@ -276,14 +310,18 @@ async function deploy() {
     return tx.txHash;
   });
 
-  // The vault floor is 0 here, but `minimumExpiration` still adds the SDK's
-  // mining margin — which is the whole reason a hardcoded 90s was rejected.
-  const expiresAt = minimumExpiration(0, undefined, now) + EXPIRY_MARGIN_SECONDS;
+  // Computed here, at the moment of proposing, against the live clock —
+  // `minimumExpiration` with no `at` argument. Anything stashed earlier in
+  // the run is already minutes stale by the time this executes.
+  let expiresAt = 0;
   await step('expired', async () => {
+    expiresAt = minimumExpiration(0) + EXPIRY_MARGIN_SECONDS;
     const tx = await heldVault.propose.transfer({ to: me, amount: 3n, expiration: expiresAt });
     return tx.txHash;
   });
-  log(`             (expires ${new Date(expiresAt * 1000).toISOString()} — run \`qv tx expire\` after)`);
+  if (expiresAt) {
+    log(`             (expires ${new Date(expiresAt * 1000).toISOString()} — run \`qv tx expire\` after)`);
+  }
 
   // ---- solo vault: the executing paths -----------------------------------
   log('\nsolo vault:');
@@ -337,7 +375,9 @@ async function deploy() {
     vaults: { held: held.address, solo: solo.address },
     states,
     notes: {
-      expired: `not expired until ${expiresAt}; run \`qv tx expire\` after that`,
+      ...(expiresAt
+        ? { expired: `not expired until ${expiresAt}; run \`qv tx expire\` after that` }
+        : {}),
       timelocked: `executable after ~${now + TIMELOCK_SECONDS}`,
     },
     ...(failures.length ? { failures } : {}),
