@@ -60,6 +60,19 @@ version is `0.x`, minor bumps may contain breaking changes.
 - **The spawned signer's output is no longer hidden.** stdout was piped while
   stdin was inherited, so the child's disclosure and its confirmation prompt
   were invisible while it waited for an answer.
+- **`qv key rm` refused the address it had just printed.** `key import`
+  reports a checksummed address and the confirmation compared it
+  case-sensitively against the stored lowercase form, so pasting back what the
+  tool showed you was rejected. EIP-55 casing is a checksum, not identity.
+  Vault-alias confirmations stay case-sensitive, since two aliases can differ
+  only by case.
+- **The TUI cursor followed a row index through a reordering list.** The inbox
+  was assembled by pushing from inside `Promise.all`, so its order depended on
+  which vault's reads resolved first and changed between refreshes — meaning
+  the row under the cursor could become a different transaction between
+  looking at it and pressing `a`. The inbox now has a total order (fewest
+  approvals needed, ties broken by hash) and the cursor follows the selected
+  transaction's hash across refreshes.
 
 ## [0.1.0]
 
