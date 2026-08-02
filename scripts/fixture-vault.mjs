@@ -38,10 +38,10 @@
  *   node scripts/fixture-vault.mjs --preflight       # checks, deploys nothing
  *   node scripts/fixture-vault.mjs
  *
- * Both wait for one block before doing anything, so a stalled chain is caught
- * before a half-finished deployment rather than after. `--assume-live` skips
- * that when you know the chain is merely slow; QUAIVAULT_LIVENESS_TIMEOUT_MS
- * raises the patience instead of removing the check.
+ * Preflight reports whether the head is advancing but never refuses on it —
+ * the head number is zone-scoped and writes land fine against a head that
+ * looks static. Confirmations on Orchard are slow; the full run takes many
+ * minutes.
  *
  * `--preflight` is runnable with no key at all and verifies everything that
  * does not require one: network reachable, factory registered and
@@ -60,16 +60,22 @@ const ASSUME_LIVE = argv.includes('--assume-live');
 const OUT = 'test/e2e/fixture-vaults.json';
 
 /**
- * How long to wait for a single block before giving up.
+ * How long to watch the head before reporting on it.
  *
- * Generous on purpose. A short window conflates "stalled" with "slower than
- * my patience", and a testnet is entitled to be slow — an earlier version of
- * this check demanded movement within 45s, which would refuse to deploy on
- * any chain whose block time exceeds that. All we actually need to know is
- * whether a transaction will ever be mined, so waiting minutes is fine; the
- * deployment itself takes longer than this.
+ * **This is a warning, not a gate, and the distinction was earned.** An
+ * earlier version refused to deploy when the head had not moved. That check
+ * was wrong twice over: it demanded movement inside 45s, which any chain with
+ * slower blocks would fail, and — more fundamentally — it trusted a signal
+ * that does not mean what it looks like. `getBlockNumber()` against Orchard
+ * is zone-scoped, and `getBlock(n)` on the same head throws "Invalid shard".
+ *
+ * Observed 2026-08-02: the head sat at 1627459 through ten minutes of
+ * continuous sampling and was unchanged from 21 hours earlier — and vault
+ * creation, funding and confirmation all succeeded against that same chain
+ * minutes later. A stalled head number and a working chain are not mutually
+ * exclusive here, so refusing on it would block real work for a false reason.
  */
-const LIVENESS_TIMEOUT_MS = Number(process.env.QUAIVAULT_LIVENESS_TIMEOUT_MS ?? 300_000);
+const LIVENESS_TIMEOUT_MS = Number(process.env.QUAIVAULT_LIVENESS_TIMEOUT_MS ?? 60_000);
 const LIVENESS_POLL_MS = 15_000;
 
 /**
@@ -146,21 +152,21 @@ async function preflight() {
   // advanced normally. Reachability checks cannot see it.
   log(`orchard rpc        block ${await qv.provider.getBlockNumber()}`);
   if (ASSUME_LIVE) {
-    log('                   liveness check skipped (--assume-live)');
+    log('                   head watch skipped (--assume-live)');
   } else {
     const seconds = await awaitBlock(qv);
+    log(
+      seconds === null
+        ? `                   head did not move in ${LIVENESS_TIMEOUT_MS / 1000}s — see note below`
+        : `                   head advancing, ~${seconds}s per block`,
+    );
     if (seconds === null) {
       log('');
-      log(`No block was mined in ${LIVENESS_TIMEOUT_MS / 1000}s. Refusing to deploy: every`);
-      log('write would broadcast and then wait on a receipt that may never come,');
-      log('leaving vaults half-created.');
-      log('');
-      log('If the chain is merely slow rather than stalled, re-run with --assume-live,');
-      log('or raise QUAIVAULT_LIVENESS_TIMEOUT_MS to wait longer.');
-      process.exitCode = 1;
-      return;
+      log('A static head is NOT proof the chain is down. getBlockNumber() here is');
+      log('zone-scoped and getBlock() on the same head throws "Invalid shard", so');
+      log('writes can land against a head that never appears to move. Deploying is');
+      log('still reasonable; expect slow confirmations.');
     }
-    log(`                   liveness ok, ~${seconds}s for a block`);
   }
 
   const verify = await qv.factory.verify();
@@ -197,14 +203,8 @@ async function deploy() {
   const balance = await qv.provider.getBalance(me);
   if (balance === 0n) throw new Error(`${me} holds no Orchard QUAI — fund it first`);
 
-  // The same liveness gate as --preflight. A caller who skipped preflight
-  // must not be able to start a multi-step deployment into a stalled chain.
-  if (!ASSUME_LIVE && (await awaitBlock(qv)) === null) {
-    throw new Error(
-      `no block mined in ${LIVENESS_TIMEOUT_MS / 1000}s — every write would wait on a receipt ` +
-        'that may never come. Re-run with --assume-live if the chain is merely slow.',
-    );
-  }
+  // No gate here. The head signal is unreliable (see LIVENESS_TIMEOUT_MS) and
+  // blocking a real deployment on it would be worse than a slow one.
   log(`deploying as ${me} (${balance} wei)\n`);
 
   log('creating the held vault (threshold 2, quorum unreachable)…');
@@ -220,10 +220,19 @@ async function deploy() {
   const states = {};
 
   // Both vaults need a little balance to propose value transfers against.
+  // `from` is required. Quai is sharded, so quais will not infer the
+  // originating zone for a plain value transfer and throws
+  // `unsupported addressable value (argument="target", value=null)` without
+  // it — an error that names neither `from` nor the transaction.
   log('funding both vaults…');
   for (const address of [held.address, solo.address]) {
-    const tx = await wallet.sendTransaction({ to: address, value: 10_000_000_000_000_000n });
+    const tx = await wallet.sendTransaction({
+      from: me,
+      to: address,
+      value: 10_000_000_000_000_000n,
+    });
     await tx.wait();
+    log(`  ${address}  ${tx.hash}`);
   }
 
   const now = Math.floor(Date.now() / 1000);
