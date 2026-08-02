@@ -52,7 +52,7 @@
  * Writes `test/e2e/fixture-vaults.json`, which the e2e suite reads.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
-import { connect, testnet, MAX_EXECUTION_DELAY } from '@quaivault/sdk';
+import { connect, testnet, MAX_EXECUTION_DELAY, minimumExpiration } from '@quaivault/sdk';
 import { getBytes, SigningKey, Wallet, getAddress } from 'quais';
 
 const argv = process.argv.slice(2);
@@ -108,8 +108,20 @@ async function awaitBlock(qv) {
 /** A well-formed Quai address nobody holds the key to, for the held vault. */
 const CO_OWNER = '0x0071111111111111111111111111111111111111';
 
-/** Short enough to expire during the run, long enough to propose against. */
-const SHORT_EXPIRY_SECONDS = 90;
+/**
+ * Margin above the contract's minimum expiry, for the `expired` fixture.
+ *
+ * The floor is **not** `now + effectiveDelay`. `_proposeTransaction` rejects
+ * `expiration <= block.timestamp + effectiveDelay`, and the SDK's
+ * `minimumExpiration` adds a margin on top to absorb the gap between building
+ * a proposal and it being mined. An earlier version of this script hardcoded
+ * `now + 90` and was rejected on chain with "expiration 1785702448 is too
+ * soon … requires an expiration after 1785702780" — a 332-second shortfall.
+ *
+ * So the floor comes from the SDK, exactly as `qv propose` computes it, and
+ * this is only the cushion added to it.
+ */
+const EXPIRY_MARGIN_SECONDS = 60;
 /** Long enough that `timelocked` is still timelocked when the script ends. */
 const TIMELOCK_SECONDS = 3600;
 
@@ -239,67 +251,84 @@ async function deploy() {
 
   const now = Math.floor(Date.now() / 1000);
 
+  // Each state is independent. A single failure must not discard the states
+  // already created — this run costs twenty minutes of confirmations, and a
+  // partial fixture is far more useful than none.
+  const failures = [];
+  const step = async (name, fn) => {
+    try {
+      states[name] = await fn();
+      log(`  ${name.padEnd(10)} ${states[name]}`);
+    } catch (err) {
+      failures.push(`${name}: ${err?.message ?? err}`);
+      log(`  ${name.padEnd(10)} FAILED — ${String(err?.message ?? err).slice(0, 120)}`);
+    }
+  };
+
   // ---- held vault: the states that require quorum NOT to be reached -------
   log('\nheld vault:');
 
-  const pending = await heldVault.propose.transfer({ to: me, amount: 1n });
-  states.pending = pending.txHash;
-  log(`  pending    ${states.pending}`);
+  await step('pending', async () => (await heldVault.propose.transfer({ to: me, amount: 1n })).txHash);
 
-  const toCancel = await heldVault.propose.transfer({ to: me, amount: 2n });
-  await heldVault.cancel(toCancel.txHash);
-  states.cancelled = toCancel.txHash;
-  log(`  cancelled  ${states.cancelled}`);
-
-  // ProposeOptions is merged into the params object, not a second argument.
-  const toExpire = await heldVault.propose.transfer({
-    to: me,
-    amount: 3n,
-    expiration: now + SHORT_EXPIRY_SECONDS,
+  await step('cancelled', async () => {
+    const tx = await heldVault.propose.transfer({ to: me, amount: 2n });
+    await heldVault.cancel(tx.txHash);
+    return tx.txHash;
   });
-  states.expired = toExpire.txHash;
-  log(`  expiring   ${states.expired}  (expire it after ${SHORT_EXPIRY_SECONDS}s)`);
+
+  // The vault floor is 0 here, but `minimumExpiration` still adds the SDK's
+  // mining margin — which is the whole reason a hardcoded 90s was rejected.
+  const expiresAt = minimumExpiration(0, undefined, now) + EXPIRY_MARGIN_SECONDS;
+  await step('expired', async () => {
+    const tx = await heldVault.propose.transfer({ to: me, amount: 3n, expiration: expiresAt });
+    return tx.txHash;
+  });
+  log(`             (expires ${new Date(expiresAt * 1000).toISOString()} — run \`qv tx expire\` after)`);
 
   // ---- solo vault: the executing paths -----------------------------------
   log('\nsolo vault:');
 
-  const ready = await soloVault.propose.transfer({ to: me, amount: 1n });
-  await soloVault.approve(ready.txHash);
-  states.ready = ready.txHash;
-  log(`  ready      ${states.ready}`);
-
-  const timelocked = await soloVault.propose.transfer({
-    to: me,
-    amount: 1n,
-    executionDelay: TIMELOCK_SECONDS,
+  await step('ready', async () => {
+    const tx = await soloVault.propose.transfer({ to: me, amount: 1n });
+    await soloVault.approve(tx.txHash);
+    return tx.txHash;
   });
-  await soloVault.approve(timelocked.txHash);
-  states.timelocked = timelocked.txHash;
-  log(`  timelocked ${states.timelocked}  (executable in ${TIMELOCK_SECONDS}s)`);
 
-  const executed = await soloVault.propose.transfer({ to: me, amount: 1n });
-  await soloVault.approve(executed.txHash);
-  await soloVault.execute(executed.txHash);
-  states.executed = executed.txHash;
-  log(`  executed   ${states.executed}`);
+  await step('timelocked', async () => {
+    const tx = await soloVault.propose.transfer({
+      to: me,
+      amount: 1n,
+      executionDelay: TIMELOCK_SECONDS,
+    });
+    await soloVault.approve(tx.txHash);
+    return tx.txHash;
+  });
+
+  await step('executed', async () => {
+    const tx = await soloVault.propose.transfer({ to: me, amount: 1n });
+    await soloVault.approve(tx.txHash);
+    await soloVault.execute(tx.txHash);
+    return tx.txHash;
+  });
 
   // The inner call reverts while the chain transaction succeeds — the exact
   // case Appendix A records a shipped UI rendering as a green check.
   // An ERC-20 `transfer` aimed at a contract that has no such selector and no
   // fallback: the outer Quai transaction succeeds, the inner vault call
   // reverts.
-  const failing = await soloVault.propose.erc20Transfer({
-    token: testnet.contracts.socialRecovery,
-    to: me,
-    amount: 1n,
+  await step('failed', async () => {
+    const tx = await soloVault.propose.erc20Transfer({
+      token: testnet.contracts.socialRecovery,
+      to: me,
+      amount: 1n,
+    });
+    await soloVault.approve(tx.txHash);
+    const outcome = await soloVault
+      .execute(tx.txHash)
+      .catch((e) => ({ outcome: 'threw', message: e.message }));
+    log(`             (execute outcome: ${outcome.outcome})`);
+    return tx.txHash;
   });
-  await soloVault.approve(failing.txHash);
-  const outcome = await soloVault.execute(failing.txHash).catch((e) => ({
-    outcome: 'threw',
-    message: e.message,
-  }));
-  states.failed = failing.txHash;
-  log(`  failed     ${states.failed}  (outcome: ${outcome.outcome})`);
 
   const fixture = {
     network: 'testnet',
@@ -308,12 +337,19 @@ async function deploy() {
     vaults: { held: held.address, solo: solo.address },
     states,
     notes: {
-      expired: `not expired until ${now + SHORT_EXPIRY_SECONDS}; run \`qv tx expire\` after that`,
+      expired: `not expired until ${expiresAt}; run \`qv tx expire\` after that`,
       timelocked: `executable after ~${now + TIMELOCK_SECONDS}`,
     },
+    ...(failures.length ? { failures } : {}),
   };
   writeFileSync(OUT, `${JSON.stringify(fixture, null, 2)}\n`);
-  log(`\nwrote ${OUT}`);
+  log(`\nwrote ${OUT} — ${Object.keys(states).length} of 7 states`);
+  if (failures.length) {
+    log('');
+    log('Some states failed. The fixture is still usable for the rest:');
+    for (const f of failures) log(`  ${f}`);
+    process.exitCode = 1;
+  }
   log('\nRemaining manual step: after the expiry passes, run');
   log(`  qv tx expire ${held.address} ${states.expired}`);
   log('to move that proposal from pending-past-expiry into the expired state.');
