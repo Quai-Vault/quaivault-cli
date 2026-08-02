@@ -64,6 +64,23 @@ async function rowsFor(
   }));
 }
 
+/**
+ * Urgency order, and a total one.
+ *
+ * Closest to actionable first — fewest approvals still needed — then the
+ * transaction hash to break ties. The hash tiebreak is what makes the order
+ * *stable*: without it, two equally-urgent transactions can swap places
+ * between refreshes and the selection follows the index, not the transaction.
+ */
+function sortInbox(rows: TuiRow[]): TuiRow[] {
+  return [...rows].sort((a, b) => {
+    const needA = Math.max(0, a.tx.threshold - a.tx.approvalCount);
+    const needB = Math.max(0, b.tx.threshold - b.tx.approvalCount);
+    if (needA !== needB) return needA - needB;
+    return a.tx.hash < b.tx.hash ? -1 : a.tx.hash > b.tx.hash ? 1 : 0;
+  });
+}
+
 interface PendingRecoveryRow {
   hash: string;
   newOwners: string[];
@@ -94,27 +111,34 @@ async function refresh(
   vaultsOut(vaults);
   const degraded = health?.available === false;
 
-  const summaries: VaultSummary[] = [];
-  const inbox: TuiRow[] = [];
-  await Promise.all(
-    vaults.map(async (address) => {
+  // Indexed rather than pushed. Pushing from inside `Promise.all` orders the
+  // list by whichever vault's reads happen to resolve first, so the inbox
+  // reshuffles between refreshes — and on a surface that auto-refreshes on
+  // chain events, the row under the cursor can change identity between
+  // looking at it and pressing `a`. Observed against 25 live Orchard vaults.
+  const perVault = await Promise.all(
+    vaults.map(async (address, i) => {
       const vault = ctx.qv.vault(address);
       const [pending, hasRecovery] = await Promise.all([
         vault.pendingTransactions({ limit: 50 }).catch((): VaultTransaction[] => []),
         vault.recovery.hasPending().catch(() => false),
       ]);
-      summaries.push({
-        address,
-        label: labelFor(ctx, address),
-        pending: pending.length,
-        hasRecovery,
-      });
-      inbox.push(...(await rowsFor(ctx, address, identity, pending)));
+      return {
+        i,
+        summary: {
+          address,
+          label: labelFor(ctx, address),
+          pending: pending.length,
+          hasRecovery,
+        } satisfies VaultSummary,
+        rows: await rowsFor(ctx, address, identity, pending),
+      };
     }),
   );
+  perVault.sort((a, b) => a.i - b.i);
 
-  dispatch({ type: 'vaults', vaults: summaries });
-  dispatch({ type: 'data', rows: inbox, degraded, at: ctx.now() });
+  dispatch({ type: 'vaults', vaults: perVault.map((v) => v.summary) });
+  dispatch({ type: 'data', rows: sortInbox(perVault.flatMap((v) => v.rows)), degraded, at: ctx.now() });
 
   const address = vaults[0];
   if (!address) {

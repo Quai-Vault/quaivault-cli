@@ -214,6 +214,28 @@ export function activeList(state: TuiState): TuiRow[] {
   return [];
 }
 
+/**
+ * Keep the cursor on the *transaction* it was on, not the index.
+ *
+ * A refresh can reorder or shorten the list — an approval lands, something
+ * executes, a vault's reads come back in a different order. Following the
+ * index means the row under the cursor silently becomes a different
+ * transaction, and this is a surface people approve from. Following the hash
+ * means the worst case is the selection falling back to a clamped index
+ * because the transaction genuinely went away.
+ */
+function reselect(
+  state: TuiState,
+  pane: Pane,
+  before: readonly TuiRow[],
+  after: readonly TuiRow[],
+): number {
+  if (state.pane !== pane) return state.selected;
+  const anchor = before[state.selected]?.tx.hash;
+  const moved = anchor ? after.findIndex((r) => r.tx.hash === anchor) : -1;
+  return moved >= 0 ? moved : Math.min(state.selected, Math.max(0, after.length - 1));
+}
+
 function clampScroll(state: TuiState): TuiState {
   const { selected, scroll, viewport } = state;
   const length = activeList(state).length;
@@ -230,10 +252,7 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
       return { ...state, load: { ...state.load, status: 'loading' } };
 
     case 'data': {
-      const selected =
-        state.pane === 'inbox'
-          ? Math.min(state.selected, Math.max(0, event.rows.length - 1))
-          : state.selected;
+      const selected = reselect(state, 'inbox', state.rows, event.rows);
       return clampScroll({
         ...state,
         rows: event.rows,
@@ -252,7 +271,11 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
       };
 
     case 'history':
-      return clampScroll({ ...state, history: event.rows });
+      return clampScroll({
+        ...state,
+        history: event.rows,
+        selected: reselect(state, 'history', state.history, event.rows),
+      });
 
     case 'vault-detail':
       return { ...state, vaultDetail: event.detail };

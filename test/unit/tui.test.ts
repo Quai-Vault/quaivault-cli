@@ -385,3 +385,79 @@ describe('mapKey', () => {
     expect(mapKey('ab', {})).toBeNull();
   });
 });
+
+describe('the cursor follows the transaction, not the index', () => {
+  /**
+   * Found against 25 live Orchard vaults: the inbox was assembled by pushing
+   * from inside `Promise.all`, so its order depended on which vault's reads
+   * resolved first and changed between refreshes. On a surface that
+   * auto-refreshes on chain events, that means the row under the cursor can
+   * become a *different transaction* between looking at it and pressing `a`.
+   */
+  const rowFor = (hash: string): TuiRow => ({
+    vault: ADDR.vault,
+    vaultLabel: 'v',
+    tx: fakeTx({ hash }),
+    affordances: [],
+    batch: null,
+  });
+  const H = (n: number) => `0x${String(n).padStart(64, '0')}`;
+
+  it('keeps the selection on the same hash when the list reorders', () => {
+    let s = reduce(initialState(10), {
+      type: 'data',
+      rows: [rowFor(H(1)), rowFor(H(2)), rowFor(H(3))],
+      degraded: false,
+      at: 0,
+    });
+    s = press(s, 'j', 'j'); // on H(3)
+    expect(selectedRow(s)?.tx.hash).toBe(H(3));
+
+    // Same set, different order — exactly what the old push-order produced.
+    s = reduce(s, {
+      type: 'data',
+      rows: [rowFor(H(3)), rowFor(H(1)), rowFor(H(2))],
+      degraded: false,
+      at: 1,
+    });
+    expect(selectedRow(s)?.tx.hash, 'cursor jumped to a different transaction').toBe(H(3));
+    expect(s.selected).toBe(0);
+  });
+
+  it('falls back to a clamped index when the transaction is gone', () => {
+    // It executed, or expired. There is nothing to follow, so clamping is
+    // the only option — but it must not throw or select out of range.
+    let s = reduce(initialState(10), {
+      type: 'data',
+      rows: [rowFor(H(1)), rowFor(H(2)), rowFor(H(3))],
+      degraded: false,
+      at: 0,
+    });
+    s = press(s, 'j', 'j');
+    s = reduce(s, { type: 'data', rows: [rowFor(H(1))], degraded: false, at: 1 });
+    expect(s.selected).toBe(0);
+    expect(selectedRow(s)?.tx.hash).toBe(H(1));
+  });
+
+  it('anchors the history pane independently of the inbox', () => {
+    let s = { ...initialState(10), pane: 'history' as const };
+    s = reduce(s, { type: 'history', rows: [rowFor(H(1)), rowFor(H(2))], at: 0 } as never);
+    s = press(s, 'j');
+    expect(selectedRow(s)?.tx.hash).toBe(H(2));
+    s = reduce(s, { type: 'history', rows: [rowFor(H(2)), rowFor(H(1))] } as never);
+    expect(selectedRow(s)?.tx.hash).toBe(H(2));
+  });
+
+  it('does not move the inbox selection when only history reloads', () => {
+    let s = reduce(initialState(10), {
+      type: 'data',
+      rows: [rowFor(H(1)), rowFor(H(2))],
+      degraded: false,
+      at: 0,
+    });
+    s = press(s, 'j');
+    const before = s.selected;
+    s = reduce(s, { type: 'history', rows: [rowFor(H(9))] } as never);
+    expect(s.selected).toBe(before);
+  });
+});
