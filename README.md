@@ -224,6 +224,10 @@ and dotfile repositories.
   ABI resolution is measured and deferred rather than built.
 - [`SECURITY.md`](SECURITY.md) — what this tool protects against, what it does
   not, and every irreversible action with its guard.
+- [`docs/environment-notes.md`](docs/environment-notes.md) — Quai and quais
+  behaviours observed directly against live networks: checksummed-address
+  requirements, why a static block number proves nothing, and the expiry floor
+  that is not what it looks like.
 
 ## Development
 
