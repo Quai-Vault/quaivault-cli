@@ -133,6 +133,28 @@ admitting you do not know.
 
 ---
 
+## SDK writes wait on a receipt forever
+
+`vault.approve()` and the other writes await a receipt with no timeout of
+their own. A transaction that is broadcast and then dropped therefore hangs
+the caller indefinitely rather than failing.
+
+**Observed**: a `timelocked` approval hung for **91 minutes**. The account's
+mempool nonce was clean (`latest` and `pending` both 6739), proving nothing
+was queued, and every pre-flight read on the same vault returned in under a
+second — `info()` 1044 ms, `pendingTransactions()` 580 ms, `transaction()`
+305 ms, `affordances()` 242 ms. Re-issuing the identical `approve()` in a
+fresh process succeeded in **28.6 s**.
+
+So this is not a broken call; it is one dropped broadcast with nothing to
+time it out. For `qv tx approve` the consequence is a command that can hang
+rather than fail, which matters most for an agent with no human to notice.
+
+**What to do.** Bound it at the call site. `scripts/fixture-vault.mjs` gives
+each step a 10-minute budget (`QUAIVAULT_STEP_TIMEOUT_MS`) and moves on.
+Note the caveat: a timeout does not cancel the broadcast, so the transaction
+may still land afterwards.
+
 ## Orchard confirmations are slow and highly variable
 
 Minutes per write, and not consistently so: two vault creations plus a funding

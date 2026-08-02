@@ -65,6 +65,20 @@ const SKIP_HEAD_WATCH = argv.includes('--skip-head-watch') || argv.includes('--a
  * redeploying two vaults to retry one proposal is a poor trade.
  */
 const REPAIR = argv.includes('--repair');
+
+/**
+ * Give up on a single state after this long.
+ *
+ * The SDK waits on a receipt with no timeout of its own, so a transaction
+ * that is broadcast and then dropped hangs the run forever — observed once at
+ * 91 minutes on a `timelocked` approval, with a clean mempool nonce proving
+ * nothing was pending. Re-running the same approval fresh took 28 seconds.
+ *
+ * A timeout here does **not** cancel the broadcast. The transaction may still
+ * land afterwards, in which case `--repair` would create a duplicate rather
+ * than adopt it — noisy on a testnet, and far better than a wedged run.
+ */
+const STEP_TIMEOUT_MS = Number(process.env.QUAIVAULT_STEP_TIMEOUT_MS ?? 600_000);
 const OUT = 'test/e2e/fixture-vaults.json';
 
 /** The seven lifecycle states a complete fixture holds. */
@@ -290,8 +304,19 @@ async function deploy() {
       log(`  ${name.padEnd(10)} ${states[name]}  (already present)`);
       return;
     }
+    const timeout = Symbol('timeout');
     try {
-      states[name] = await fn();
+      const result = await Promise.race([
+        fn(),
+        new Promise((r) => setTimeout(() => r(timeout), STEP_TIMEOUT_MS)),
+      ]);
+      if (result === timeout) {
+        const mins = Math.round(STEP_TIMEOUT_MS / 60000);
+        failures.push(`${name}: no receipt within ${mins}m (may still land; --repair would duplicate)`);
+        log(`  ${name.padEnd(10)} TIMED OUT after ${mins}m — moving on`);
+        return;
+      }
+      states[name] = result;
       log(`  ${name.padEnd(10)} ${states[name]}`);
     } catch (err) {
       failures.push(`${name}: ${err?.message ?? err}`);
