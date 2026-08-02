@@ -46,7 +46,7 @@
     "test:watch": "vitest",
     "test:sdk-contract": "vitest run test/contract",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
-    "lint": "eslint src test --max-warnings 0",
+    "lint": "eslint src test scripts --max-warnings 0",
     "check": "npm run typecheck && npm run lint && npm test",
     "prepublishOnly": "npm run check && npm run build"
   },

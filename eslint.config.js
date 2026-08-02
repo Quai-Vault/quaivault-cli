@@ -103,6 +103,36 @@ export default tseslint.config(
     rules: { '@typescript-eslint/require-await': 'off' },
   },
   {
+    // Plain .mjs tooling. It is not typechecked, so `no-undef` is the only
+    // thing standing between a deleted variable and a run that does forty
+    // minutes of chain work and then dies on the final write — which is
+    // exactly what happened to `now` in fixture-vault.mjs.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      // Opt out of the type-aware parser: these files are not in tsconfig and
+      // do not need to be. `no-undef` is a syntactic rule and is the point.
+      parserOptions: { projectService: false, project: false },
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        Buffer: 'readonly',
+        fetch: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        AbortController: 'readonly',
+        URL: 'readonly',
+      },
+    },
+    rules: {
+      ...tseslint.configs.disableTypeChecked.rules,
+      'no-undef': 'error',
+      'no-console': 'off',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+    },
+  },
+  {
     files: ['test/**/*.ts', 'scripts/**/*.ts'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',

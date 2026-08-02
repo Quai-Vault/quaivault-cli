@@ -339,6 +339,7 @@ async function deploy() {
   // `minimumExpiration` with no `at` argument. Anything stashed earlier in
   // the run is already minutes stale by the time this executes.
   let expiresAt = 0;
+  let timelockedAt = 0;
   await step('expired', async () => {
     expiresAt = minimumExpiration(0) + EXPIRY_MARGIN_SECONDS;
     const tx = await heldVault.propose.transfer({ to: me, amount: 3n, expiration: expiresAt });
@@ -358,6 +359,7 @@ async function deploy() {
   });
 
   await step('timelocked', async () => {
+    timelockedAt = Math.floor(Date.now() / 1000);
     const tx = await soloVault.propose.transfer({
       to: me,
       amount: 1n,
@@ -403,7 +405,9 @@ async function deploy() {
       ...(expiresAt
         ? { expired: `not expired until ${expiresAt}; run \`qv tx expire\` after that` }
         : {}),
-      timelocked: `executable after ~${now + TIMELOCK_SECONDS}`,
+      ...(timelockedAt
+        ? { timelocked: `executable after ~${timelockedAt + TIMELOCK_SECONDS}` }
+        : {}),
     },
     ...(failures.length ? { failures } : {}),
   };
