@@ -59,6 +59,11 @@ export async function confirm(
 export async function promptYesNo(question: string): Promise<boolean> {
   const input = process.platform === 'win32' ? process.stdin : createReadStream('/dev/tty');
   const output = process.platform === 'win32' ? process.stderr : createWriteStream('/dev/tty');
+  // readline can write to the tty after we destroy it on the way out, and an
+  // unhandled 'error' event kills the process with ERR_STREAM_DESTROYED and a
+  // stack trace, replacing whatever real error we were reporting.
+  input.on('error', () => undefined);
+  output.on('error', () => undefined);
   const rl = createInterface({ input, output, terminal: true });
   try {
     const answer = await rl.question(question);
@@ -107,6 +112,8 @@ export async function promptTyped(
 ): Promise<boolean> {
   const input = process.platform === 'win32' ? process.stdin : createReadStream('/dev/tty');
   const output = process.platform === 'win32' ? process.stderr : createWriteStream('/dev/tty');
+  input.on('error', () => undefined);
+  output.on('error', () => undefined);
   const rl = createInterface({ input, output, terminal: true });
   try {
     return matchesTyped(await rl.question(question), expected, opts);

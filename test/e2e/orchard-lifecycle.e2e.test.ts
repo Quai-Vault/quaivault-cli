@@ -101,9 +101,9 @@ describe.skipIf(!available)('Orchard fixture vaults', () => {
   });
 
   /**
-   * The lifecycle states. `expired` is excluded from the strict mapping
-   * because it only becomes expired once someone calls `qv tx expire` past
-   * the expiry, which the script leaves as a manual step.
+   * All seven, strictly. `expired` only reaches that state once someone runs
+   * `qv tx expire` past the expiry — the script leaves it as a manual step —
+   * so a fixture built but not finished will fail here, which is the point.
    */
   const EXPECTED: Record<string, string[]> = {
     pending: ['pending'],
@@ -112,7 +112,7 @@ describe.skipIf(!available)('Orchard fixture vaults', () => {
     timelocked: ['timelocked'],
     executed: ['executed'],
     failed: ['failed'],
-    expired: ['pending', 'expired'],
+    expired: ['expired'],
   };
 
   it('renders every recorded lifecycle state with the status the CLI claims', async () => {

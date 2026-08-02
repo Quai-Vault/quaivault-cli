@@ -43,7 +43,11 @@ function buildContext(flags: GlobalFlags, io: Io, held: { signer?: SignerResolut
   const { name: profileName, profile } = resolveProfile(config, flags);
   const skew: SkewState = { offsetSeconds: 0, detected: false };
   const now = createClock(skew);
-  const qv = createClient({ profile, now });
+  // Rebound by `requireSigner()` once a key is unlocked. `ctx.qv` is a getter
+  // over this, so every existing call site picks up the signing client without
+  // each one having to remember to.
+  let active = createClient({ profile, now });
+  const qv = active;
   const policy = loadPolicy();
   const interactive = canPrompt() && !flags.noInput;
   const store = new ResultStore(now);
@@ -54,7 +58,9 @@ function buildContext(flags: GlobalFlags, io: Io, held: { signer?: SignerResolut
   }
 
   return {
-    qv,
+    get qv() {
+      return active;
+    },
     config,
     profile,
     profileName,
@@ -98,6 +104,14 @@ function buildContext(flags: GlobalFlags, io: Io, held: { signer?: SignerResolut
           'Run `qv key use <name>` to match them, or pass --as with the key\'s address.',
         );
       }
+      // **Rebind the client to the signer.** Without this the signer is
+      // resolved, validated, and then thrown away: every write goes through
+      // `ctx.qv.vault(...)`, which was connected read-only at startup, and the
+      // SDK refuses with "This vault write requires a signer". That made the
+      // entire write surface non-functional, and no unit test could see it —
+      // the typed fake has no notion of a signer, and `plan()` is read-only by
+      // design, so only a real key against a real chain surfaces it.
+      active = createClient({ profile, now, signer: resolved.signer });
       return { signer: resolved.signer, address: resolved.address };
     },
   };
@@ -189,7 +203,12 @@ export async function runCommand(opts: RunOptions): Promise<ExitCodeValue> {
         return ExitCode.Declined;
       }
 
-      result = await opts.spec.commit(ctx, planned, opts.input, signal);
+      // `needs: { signer: true }` was declared on every write command and
+      // acted on nowhere. Unlock before committing, after the confirmation —
+      // so `--dry-run` and a declined prompt still never touch the keystore.
+      if (opts.spec.needs?.signer) await active.requireSigner();
+
+      result = await opts.spec.commit(active, planned, opts.input, signal);
     } else {
       throw new Error(`Command "${id}" implements neither run nor plan/commit.`);
     }
