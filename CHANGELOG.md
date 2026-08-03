@@ -6,7 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is `0.x`, minor bumps may contain breaking changes.
 
-## [Unreleased]
+## [0.1.0] — 2026-08-03
+
+First release. Built against `@quaivault/sdk` 0.6.0, pinned exactly.
 
 ### Added
 
@@ -74,11 +76,7 @@ version is `0.x`, minor bumps may contain breaking changes.
   approvals needed, ties broken by hash) and the cursor follows the selected
   transaction's hash across refreshes.
 
-## [0.1.0]
-
-First release. Built against `@quaivault/sdk` 0.6.0, pinned exactly.
-
-### Added
+### Also in this release
 
 - **Keyless read surface** — `status`, `doctor`, `inbox` (cross-vault, urgency-ordered),
   `vault show/ls/receive`, `tx ls/history/show/wait`, `balance`, `messages`,
