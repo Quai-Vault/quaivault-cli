@@ -75,19 +75,31 @@ jobs:
           ./node_modules/.bin/quaivault --help >/dev/null
           ./node_modules/.bin/qv addr check 0x0081f4e8a9b0c1d2e3f405162738495a6b7c8d78 | grep -q "NOT usable"
       # A unit test can check the generated text; only a shell can check that
-      # it parses. Both bash and zsh ship on the runner.
+      # it parses.
+      #
+      # Generation is checked for all three shells unconditionally. The
+      # *parse* check runs only where the shell exists: an earlier version
+      # asserted "both bash and zsh ship on the runner", which was an
+      # assumption rather than a fact, and it failed the release. Only bash is
+      # guaranteed, so only bash is required.
       - name: generated completion scripts parse in their shells
         run: |
           node dist/qv.js completion bash > /tmp/qv.bash
           node dist/qv.js completion zsh  > /tmp/_qv
           node dist/qv.js completion fish > /tmp/qv.fish
+          test -s /tmp/qv.bash && test -s /tmp/_qv && test -s /tmp/qv.fish
+
           bash -n /tmp/qv.bash
-          zsh -n /tmp/_qv
           # Sourcing it and driving one completion catches a script that
           # parses but produces nothing.
           bash -c 'source /tmp/qv.bash
             COMP_WORDS=(qv tx a); COMP_CWORD=2; _qv_complete
             test "${COMPREPLY[0]}" = "approve" || { echo "completion produced: ${COMPREPLY[*]}"; exit 1; }'
+
+          if command -v zsh >/dev/null 2>&1; then zsh -n /tmp/_qv && echo "zsh: parsed";
+          else echo "zsh: not installed on this runner — parse check skipped"; fi
+          if command -v fish >/dev/null 2>&1; then fish -n /tmp/qv.fish && echo "fish: parsed";
+          else echo "fish: not installed on this runner — parse check skipped"; fi
       - name: no unexpected files in the tarball
         run: |
           npm pack --dry-run --json | node -e "
