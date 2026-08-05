@@ -86,7 +86,24 @@ export interface LoadState {
 
 // -------------------------------------------------------------------- form
 
-export type ProposeKind = 'transfer' | 'token' | 'add-owner' | 'threshold';
+export type ProposeKind =
+  | 'transfer'
+  | 'token'
+  | 'add-owner'
+  | 'threshold'
+  | 'delay'
+  | 'delegatecall';
+
+/**
+ * The literal a user types to arm `--i-understand-unverified`.
+ *
+ * Whitelisting a DelegateCall target is the strongest authority the vault can
+ * grant — that target can rewrite vault storage — so the one-shot command
+ * refuses without the flag. The form does not pass it silently: typing this is
+ * the same deliberate act, in the same spirit as the typed address `qv key rm`
+ * asks for.
+ */
+export const UNVERIFIED_ACK = 'i-understand';
 
 export interface FormField {
   name: string;
@@ -122,6 +139,23 @@ export const FORM_FIELDS: Record<ProposeKind, readonly FormField[]> = {
   ],
   threshold: [
     { name: 'threshold', label: 'threshold', hint: 'new signature count', required: true },
+    { name: 'expiration', label: 'expires', hint: '7d, 24h, or blank', required: false },
+    { name: 'executionDelay', label: 'delay', hint: 'extra timelock, or blank', required: false },
+  ],
+  delay: [
+    { name: 'minDelay', label: 'min timelock', hint: "the vault's new floor, e.g. 24h or 0", required: true },
+    { name: 'expiration', label: 'expires', hint: '7d, 24h, or blank', required: false },
+    { name: 'executionDelay', label: 'delay', hint: 'extra timelock, or blank', required: false },
+  ],
+  delegatecall: [
+    { name: 'action', label: 'action', hint: 'add or rm', required: true },
+    { name: 'target', label: 'target', hint: '0x… delegatecall target', required: true },
+    {
+      name: 'acknowledge',
+      label: 'acknowledge',
+      hint: `to add, type ${UNVERIFIED_ACK} — the target can rewrite vault storage`,
+      required: false,
+    },
     { name: 'expiration', label: 'expires', hint: '7d, 24h, or blank', required: false },
     { name: 'executionDelay', label: 'delay', hint: 'extra timelock, or blank', required: false },
   ],
@@ -169,6 +203,7 @@ export interface TuiState {
 
 export type TuiEvent =
   | { type: 'key'; key: string }
+  | { type: 'paste'; text: string }
   | { type: 'resize'; rows: number }
   | { type: 'data'; rows: TuiRow[]; degraded: boolean; at: number }
   | { type: 'vaults'; vaults: VaultSummary[] }
@@ -183,6 +218,27 @@ export type TuiEvent =
 
 /** Bounded so a busy vault cannot grow the activity log without limit. */
 export const ACTIVITY_LIMIT = 200;
+
+/**
+ * Longest value a field will hold.
+ *
+ * Typing is self-limiting; a paste is not, and the clipboard can hold a
+ * megabyte. The longest thing any field legitimately takes is a 42-character
+ * address, so this is generous rather than tight.
+ */
+export const MAX_FIELD_LENGTH = 128;
+
+/**
+ * Control and format characters, stripped from anything pasted.
+ *
+ * `Cc` catches the newline a copied address usually carries — and `return` on
+ * the last field is the submit gesture, so a paste that kept its newline could
+ * submit a form the user was still filling in. `Cf` catches zero-width and
+ * bidirectional-override characters, which is the difference between an
+ * address you can read and one that renders as something other than what it
+ * is.
+ */
+const CONTROL_OR_FORMAT = /[\p{Cc}\p{Cf}]/gu;
 
 export function initialState(viewport = 10): TuiState {
   return {
@@ -318,6 +374,9 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
 
     case 'key':
       return reduceKey(state, event.key);
+
+    case 'paste':
+      return reducePaste(state, event.text);
 
     default: {
       const never: never = event;
@@ -506,6 +565,50 @@ function reduceForm(state: TuiState, key: string): TuiState {
   }
 }
 
+/**
+ * Insert pasted text into the focused form field.
+ *
+ * A paste is the *only* way most people enter an address — nobody types 42
+ * hex characters — and it used to be dropped outright: Ink delivers a paste as
+ * one multi-character `input`, and `mapKey` admitted single characters only.
+ *
+ * Ignored outside a focused field. The propose form is the one text input on
+ * this surface, so a paste anywhere else should do nothing rather than
+ * something surprising.
+ */
+function reducePaste(state: TuiState, text: string): TuiState {
+  if (state.signing) return state;
+  if (state.pane !== 'propose' || state.detail || state.form.field < 0) return state;
+
+  const field = FORM_FIELDS[state.form.kind][state.form.field];
+  if (!field) return state;
+
+  const cleaned = text.replace(CONTROL_OR_FORMAT, '').trim();
+  if (!cleaned) return state;
+
+  const next = (state.form.values[field.name] ?? '') + cleaned;
+  if (next.length > MAX_FIELD_LENGTH) {
+    // Refused, not truncated. A silently shortened address is still a
+    // plausible-looking address, and this form feeds `qv propose`.
+    return {
+      ...state,
+      form: {
+        ...state.form,
+        error: `that paste is too long for ${field.label} (max ${MAX_FIELD_LENGTH} characters) — nothing was inserted`,
+      },
+    };
+  }
+
+  return {
+    ...state,
+    form: {
+      ...state.form,
+      values: { ...state.form.values, [field.name]: next },
+      error: undefined,
+    },
+  };
+}
+
 /** Fields the form still needs before it can be submitted. */
 export function missingFields(form: FormState): string[] {
   return FORM_FIELDS[form.kind]
@@ -543,6 +646,20 @@ export function formArgv(form: FormState, vault: string): string[] | null {
     case 'threshold':
       argv.push(v('threshold'));
       break;
+    case 'delay':
+      argv.push(v('minDelay'));
+      break;
+    case 'delegatecall': {
+      argv.push(v('action'), v('target'));
+      // Only ever added when the user typed the acknowledgement, and only for
+      // `add` — `rm` narrows the whitelist and needs no second gate. Without
+      // it the spawned child refuses, which is the correct outcome: the flag
+      // is a deliberate act, not a default the form supplies on your behalf.
+      if (v('action') === 'add' && v('acknowledge') === UNVERIFIED_ACK) {
+        argv.push('--i-understand-unverified');
+      }
+      break;
+    }
     default: {
       const never: never = form.kind;
       throw new Error(`unhandled propose kind: ${String(never)}`);

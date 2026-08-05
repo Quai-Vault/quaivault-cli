@@ -501,16 +501,21 @@ export function ProposePane({ state }: { state: TuiState }): React.ReactElement 
   return (
     <Box flexDirection="column">
       <Box>
-        <Box width={14}>
+        <Box width={14} flexShrink={0}>
           <Text dimColor>kind</Text>
         </Box>
-        {PROPOSE_KINDS.map((k) => (
-          <Text key={k} color={k === form.kind ? 'cyan' : undefined} dimColor={k !== form.kind}>
-            {k === form.kind ? '(•) ' : '( ) '}
-            {k}
-            {'  '}
-          </Text>
-        ))}
+        {/* Wraps: the kind list outgrew one 80-column line once `delay` and
+            `delegatecall` joined it, and a selector whose last options are off
+            the edge is a selector with hidden options. */}
+        <Box flexWrap="wrap">
+          {PROPOSE_KINDS.map((k) => (
+            <Text key={k} color={k === form.kind ? 'cyan' : undefined} dimColor={k !== form.kind}>
+              {k === form.kind ? '(•) ' : '( ) '}
+              {k}
+              {'  '}
+            </Text>
+          ))}
+        </Box>
       </Box>
       {form.field === -1 ? (
         <Text dimColor> ←/→ choose · tab to fill in the fields</Text>

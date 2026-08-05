@@ -12,12 +12,15 @@ import {
   selectedVault,
   visibleRows,
   ACTIVITY_LIMIT,
+  MAX_FIELD_LENGTH,
+  UNVERIFIED_ACK,
+  type ProposeKind,
   type TuiEvent,
   type TuiRow,
   type TuiState,
   type VaultSummary,
 } from '../../src/tui/reducer.js';
-import { mapKey } from '../../src/tui/keys.js';
+import { mapKey, pastedText } from '../../src/tui/keys.js';
 import { ADDR, fakeTx } from '../fake-client.js';
 
 function rows(n: number): TuiRow[] {
@@ -292,7 +295,7 @@ describe('the propose form', () => {
 });
 
 describe('formArgv — the security boundary', () => {
-  const filled = (kind: 'transfer' | 'token' | 'add-owner' | 'threshold', values: Record<string, string>) => ({
+  const filled = (kind: ProposeKind, values: Record<string, string>) => ({
     ...initialForm(kind),
     values,
   });
@@ -564,5 +567,151 @@ describe('vault switching', () => {
     s = press(s, ']', ']');
     s = reduce(s, { type: 'vaults', vaults: [V(1)] });
     expect(selectedVault(s)?.label).toBe('vault-1');
+  });
+});
+
+/**
+ * Pasting.
+ *
+ * Nobody types a 42-character address, and this used to be dropped outright:
+ * Ink delivers a paste as one multi-character `input`, and `mapKey` admitted
+ * single characters only, so the whole string mapped to `null`.
+ */
+describe('pasting into the propose form', () => {
+  const onField = (kind: ProposeKind = 'transfer', field = 0): TuiState => ({
+    ...initialState(),
+    pane: 'propose',
+    form: { ...initialForm(kind), field },
+  });
+
+  it('inserts pasted text into the focused field', () => {
+    const s = reduce(onField(), { type: 'paste', text: ADDR.bob });
+    expect(s.form.values.to).toBe(ADDR.bob);
+  });
+
+  it('appends to what is already typed', () => {
+    let s = reduce(onField(), { type: 'paste', text: '0x00' });
+    s = reduce(s, { type: 'paste', text: '81ab' });
+    expect(s.form.values.to).toBe('0x0081ab');
+  });
+
+  /**
+   * A copied address usually carries a trailing newline, and `return` on the
+   * last field is the submit gesture. A paste must never be able to sign.
+   */
+  it('strips the newline a copied address carries rather than submitting', () => {
+    const s = reduce(onField(), { type: 'paste', text: `${ADDR.bob}\n` });
+    expect(s.form.values.to).toBe(ADDR.bob);
+    expect(s.signing).toBeNull();
+  });
+
+  it('strips zero-width and bidi characters that would misrender an address', () => {
+    const s = reduce(onField(), { type: 'paste', text: '0x00​81‮ab' });
+    expect(s.form.values.to).toBe('0x0081ab');
+  });
+
+  it('refuses an over-long paste instead of silently truncating an address', () => {
+    const s = reduce(onField(), { type: 'paste', text: 'a'.repeat(MAX_FIELD_LENGTH + 1) });
+    expect(s.form.values.to).toBeUndefined();
+    expect(s.form.error).toMatch(/too long/);
+  });
+
+  it('is ignored when no field is focused, and outside the form entirely', () => {
+    const onSelector: TuiState = { ...initialState(), pane: 'propose' };
+    expect(reduce(onSelector, { type: 'paste', text: ADDR.bob })).toBe(onSelector);
+
+    const inbox = initialState();
+    expect(reduce(inbox, { type: 'paste', text: ADDR.bob })).toBe(inbox);
+  });
+
+  it('is ignored while a spawned signer owns the terminal', () => {
+    const s = reduce(onField(), { type: 'sign-start', hash: '0xabc', action: 'approve' });
+    expect(reduce(s, { type: 'paste', text: ADDR.bob })).toBe(s);
+  });
+});
+
+describe('pastedText — the non-bracketed-paste fallback', () => {
+  it('accepts a multi-character printable run', () => {
+    expect(pastedText(ADDR.bob, {})).toBe(ADDR.bob);
+  });
+
+  it('ignores single characters, which are ordinary typing', () => {
+    expect(pastedText('a', {})).toBeNull();
+  });
+
+  it('ignores anything carrying a named key, so an escape sequence cannot be typed in', () => {
+    expect(pastedText('abc', { escape: true })).toBeNull();
+    expect(pastedText('abc', { ctrl: true })).toBeNull();
+    expect(pastedText('abc', { upArrow: true })).toBeNull();
+  });
+
+  it('rejects a run containing control characters', () => {
+    // A bell, and an unparsed CSI fragment — the shapes a stray escape
+    // sequence takes. Neither may be typed into a field feeding `qv propose`.
+    expect(pastedText('ab\u0007c', {})).toBeNull();
+    expect(pastedText('\u001B[200~x', {})).toBeNull();
+  });
+});
+
+describe('proposing timelock and delegatecall changes from the form', () => {
+  const filled = (kind: ProposeKind, values: Record<string, string>) => ({
+    ...initialForm(kind),
+    values,
+  });
+
+  it('builds a minimum-timelock change', () => {
+    expect(formArgv(filled('delay', { minDelay: '24h' }), ADDR.vault)).toEqual([
+      'propose',
+      'delay',
+      ADDR.vault,
+      '24h',
+    ]);
+  });
+
+  it('builds a delegatecall removal, which needs no second gate', () => {
+    expect(formArgv(filled('delegatecall', { action: 'rm', target: ADDR.bob }), ADDR.vault)).toEqual(
+      ['propose', 'delegatecall', ADDR.vault, 'rm', ADDR.bob],
+    );
+  });
+
+  /**
+   * Whitelisting a target lets it rewrite vault storage. The one-shot command
+   * refuses without `--i-understand-unverified`, and the form must not supply
+   * that on the user's behalf — so an unacknowledged `add` builds argv the
+   * spawned child will correctly refuse.
+   */
+  it('does not arm --i-understand-unverified unless the acknowledgement was typed', () => {
+    const argv = formArgv(filled('delegatecall', { action: 'add', target: ADDR.bob }), ADDR.vault)!;
+    expect(argv).not.toContain('--i-understand-unverified');
+
+    const wrong = formArgv(
+      filled('delegatecall', { action: 'add', target: ADDR.bob, acknowledge: 'yes' }),
+      ADDR.vault,
+    )!;
+    expect(wrong).not.toContain('--i-understand-unverified');
+  });
+
+  it('arms it when the acknowledgement is typed exactly', () => {
+    expect(
+      formArgv(
+        filled('delegatecall', { action: 'add', target: ADDR.bob, acknowledge: UNVERIFIED_ACK }),
+        ADDR.vault,
+      ),
+    ).toEqual([
+      'propose',
+      'delegatecall',
+      ADDR.vault,
+      'add',
+      ADDR.bob,
+      '--i-understand-unverified',
+    ]);
+  });
+
+  it('never arms it for a removal, whatever is typed in the field', () => {
+    const argv = formArgv(
+      filled('delegatecall', { action: 'rm', target: ADDR.bob, acknowledge: UNVERIFIED_ACK }),
+      ADDR.vault,
+    )!;
+    expect(argv).not.toContain('--i-understand-unverified');
   });
 });

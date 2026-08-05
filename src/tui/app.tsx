@@ -1,8 +1,8 @@
-import { Box, Text, useApp, useInput, useStdout, useWindowSize } from 'ink';
+import { Box, Text, useApp, useInput, usePaste, useStdout, useWindowSize } from 'ink';
 import { useEffect, useReducer, useRef } from 'react';
 import { safeText } from '../format/index.js';
 import type { TuiEnv } from './env.js';
-import { mapKey } from './keys.js';
+import { mapKey, pastedText } from './keys.js';
 import {
   PANES,
   formArgv,
@@ -126,8 +126,30 @@ export function App({
     if (state.quit) exit();
   }, [state.quit, exit]);
 
+  /**
+   * Pasted text, on its own channel.
+   *
+   * `usePaste` turns on bracketed-paste mode, so the terminal frames the paste
+   * and Ink keeps it off the `useInput` channel entirely. Nobody types a
+   * 42-character address, so this is the primary way the propose form is
+   * filled in.
+   */
+  usePaste((text) => {
+    if (busy.current) return;
+    dispatch({ type: 'paste', text });
+  });
+
   useInput((input, key) => {
     if (busy.current) return;
+
+    // Fallback for terminals without bracketed paste, where the text arrives
+    // as ordinary input rather than through `usePaste`.
+    const pasted = pastedText(input, key);
+    if (pasted !== null) {
+      dispatch({ type: 'paste', text: pasted });
+      return;
+    }
+
     const mapped = mapKey(input, key);
     if (mapped === null) return;
 

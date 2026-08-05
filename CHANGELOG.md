@@ -6,6 +6,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is `0.x`, minor bumps may contain breaking changes.
 
+## [0.3.0] — 2026-08-05
+
+### Fixed
+
+- **Pasting into the propose form did nothing.** Ink delivers a paste as a
+  single multi-character `input`, and `mapKey` admitted single characters
+  only — so every paste mapped to `null` and was dropped, while typing worked.
+  Nobody types a 42-character address, which made the form close to unusable.
+  Pasting now goes through Ink's `usePaste`, which enables bracketed-paste mode
+  so the terminal frames the text; a fallback still catches terminals without
+  it.
+
+  Pasted text is stripped of control and format characters before it reaches a
+  field. A copied address usually carries a trailing newline and `return` on
+  the last field is the submit gesture, so a paste that kept its newline could
+  submit a form still being filled in; zero-width and bidirectional-override
+  characters are dropped for the same reason an address must render as what it
+  is. A paste past 128 characters is refused rather than truncated — a silently
+  shortened address is still a plausible-looking address.
+
+### Added
+
+- **`propose delay` and `propose delegatecall` in the TUI form.** Both already
+  existed as one-shot commands; the form offered four kinds and now offers six,
+  so the vault minimum timelock and the DelegateCall whitelist can be proposed
+  without leaving the TUI. The kind selector wraps, having outgrown one
+  80-column line.
+
+  Whitelisting a DelegateCall target lets it rewrite vault storage, and the
+  one-shot command refuses without `--i-understand-unverified`. The form does
+  **not** supply that flag on your behalf: there is an `acknowledge` field you
+  type `i-understand` into, in the same spirit as the typed address `qv key rm`
+  asks for. Removing a target narrows the whitelist and needs no second gate.
+
 ## [0.2.0] — 2026-08-05
 
 ### Added

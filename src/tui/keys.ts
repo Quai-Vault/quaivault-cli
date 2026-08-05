@@ -29,6 +29,39 @@ export interface InkKey {
  * with `input === '\t'` and a form would otherwise type a literal tab into a
  * field.
  */
+/**
+ * A paste that arrived on the key channel.
+ *
+ * `usePaste` handles the normal case: it turns on bracketed-paste mode and
+ * delivers the text on its own channel. A terminal that does not support
+ * bracketed paste sends the characters as ordinary input, and Ink hands the
+ * whole run to `useInput` as one multi-character string — which `mapKey`
+ * drops, because it admits single characters only. That is why pasting an
+ * address did nothing.
+ *
+ * Accepted only when every character is printable and no named key flag is
+ * set, so an escape sequence Ink failed to parse can never be typed into a
+ * field that feeds `qv propose`.
+ */
+export function pastedText(input: string, key: InkKey): string | null {
+  if (input.length < 2) return null;
+  if (
+    key.ctrl ||
+    key.tab ||
+    key.escape ||
+    key.return ||
+    key.backspace ||
+    key.delete ||
+    key.upArrow ||
+    key.downArrow ||
+    key.leftArrow ||
+    key.rightArrow
+  ) {
+    return null;
+  }
+  return /^[^\p{Cc}\p{Cf}]+$/u.test(input) ? input : null;
+}
+
 export function mapKey(input: string, key: InkKey): string | null {
   if (key.tab) return key.shift ? 'shift-tab' : 'tab';
   if (key.escape) return 'escape';
