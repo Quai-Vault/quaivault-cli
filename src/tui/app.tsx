@@ -41,6 +41,11 @@ export interface AppProps {
   /** Re-read everything. */
   onRefresh: (dispatch: (event: TuiEvent) => void) => Promise<void>;
   /**
+   * Re-read only the vault-scoped panes, for a new vault. Optional so tests
+   * can render the tree without a data layer.
+   */
+  onSelectVault?: (dispatch: (event: TuiEvent) => void, address: string) => Promise<void>;
+  /**
    * Hand the terminal to a one-shot child. The caller suspends Ink first, so
    * the child owns stdin and stdout while it runs.
    */
@@ -58,7 +63,25 @@ const PANE_LABEL: Record<Pane, string> = {
   propose: 'propose',
 };
 
-export function App({ env, seed, onRefresh, onSpawn, onSubscribe }: AppProps): React.ReactElement {
+/**
+ * Rows the chrome costs: header, tab bar, both content borders, the table's
+ * column header, and two footer lines, plus one of slack.
+ *
+ * The viewport is derived from this rather than guessed. Overshooting pushes
+ * list rows past the bottom of a fixed-height layout, where they are not
+ * merely ugly — a row you cannot see is a transaction you do not know is
+ * waiting.
+ */
+export const CHROME_ROWS = 9;
+
+export function App({
+  env,
+  seed,
+  onRefresh,
+  onSelectVault,
+  onSpawn,
+  onSubscribe,
+}: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const size = useWindowSize();
@@ -66,16 +89,38 @@ export function App({ env, seed, onRefresh, onSpawn, onSubscribe }: AppProps): R
   // While a child owns the terminal we must not act on input at all.
   const busy = useRef(false);
 
+  const rows = size.rows || stdout?.rows || 24;
+  const width = size.columns || stdout?.columns || 100;
+
   // Resize. The reducer has always had this event; nothing ever emitted it,
   // so the viewport was fixed at whatever the terminal was on launch.
   useEffect(() => {
-    dispatch({ type: 'resize', rows: Math.max(3, (size.rows || 24) - 10) });
-  }, [size.rows]);
+    dispatch({ type: 'resize', rows: Math.max(3, rows - CHROME_ROWS) });
+  }, [rows]);
 
   useEffect(() => {
     void onRefresh(dispatch);
     return onSubscribe?.(dispatch);
   }, [onRefresh, onSubscribe]);
+
+  /**
+   * The vault cursor moved, so the scoped panes are about to describe a
+   * different vault. The reducer has already blanked them; this fetches.
+   *
+   * The first address is *not* fetched here — `onRefresh` already loaded it,
+   * and firing both would double every read on startup.
+   */
+  const vaultAddress = selectedVault(state)?.address;
+  const lastVault = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!vaultAddress) return;
+    if (lastVault.current === undefined || lastVault.current === vaultAddress) {
+      lastVault.current = vaultAddress;
+      return;
+    }
+    lastVault.current = vaultAddress;
+    void onSelectVault?.(dispatch, vaultAddress);
+  }, [vaultAddress, onSelectVault]);
 
   useEffect(() => {
     if (state.quit) exit();
@@ -123,13 +168,29 @@ export function App({ env, seed, onRefresh, onSpawn, onSubscribe }: AppProps): R
       }
     }
 
-    if (state.pane === 'recovery' && mapped === 'c' && state.recovery && vault) {
-      spawn(
-        ['recovery', 'cancel', vault.address, state.recovery.hash],
-        'recovery cancel',
-        state.recovery.hash,
-      );
-      return;
+    /**
+     * Recovery is the guardian's surface, and a guardian may be an owner of
+     * nothing — so approve and execute have to live here rather than only on
+     * the transaction detail overlay, which is reached through a list a
+     * guardian-only identity has no rows in.
+     *
+     * `c` stays first in the footer: cancelling is the defensive action, and
+     * the one a compromised-key holder needs to reach fastest.
+     */
+    if (state.pane === 'recovery' && state.recovery && vault && !state.detail) {
+      const hash = state.recovery.hash;
+      if (mapped === 'c') {
+        spawn(['recovery', 'cancel', vault.address, hash], 'recovery cancel', hash);
+        return;
+      }
+      if (mapped === 'a') {
+        spawn(['recovery', 'approve', vault.address, hash], 'recovery approve', hash);
+        return;
+      }
+      if (mapped === 'x') {
+        spawn(['recovery', 'execute', vault.address, hash], 'recovery execute', hash);
+        return;
+      }
     }
 
     if (mapped === 'r' && state.pane !== 'propose') {
@@ -140,14 +201,20 @@ export function App({ env, seed, onRefresh, onSpawn, onSubscribe }: AppProps): R
     dispatch({ type: 'key', key: mapped });
   });
 
-  const width = stdout?.columns ?? 100;
   const envWithWidth: TuiEnv = { ...env, width };
 
   return (
-    <Box flexDirection="column" width={width}>
+    <Box flexDirection="column" width={width} height={rows}>
       <Header state={state} env={envWithWidth} />
       <Tabs state={state} />
-      <Box flexDirection="column" marginTop={1} marginBottom={1}>
+      <Box
+        flexGrow={1}
+        flexDirection="column"
+        borderStyle="round"
+        borderColor="gray"
+        paddingX={1}
+        overflow="hidden"
+      >
         <Body state={state} env={envWithWidth} />
       </Box>
       <Footer state={state} />
@@ -155,14 +222,39 @@ export function App({ env, seed, onRefresh, onSpawn, onSubscribe }: AppProps): R
   );
 }
 
+/**
+ * The identity bar.
+ *
+ * The vault selector is here rather than in a pane because it scopes four of
+ * the six panes — history, vault, recovery and the propose form all read it.
+ * It shows position (`2/5`) so "this is one of several" is legible without
+ * cycling, and it renders even for a single vault so the surface does not
+ * change shape when a second one appears.
+ */
 function Header({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElement {
   const vault = selectedVault(state);
   const alarm = state.vaults.some((v) => v.hasRecovery);
+  const many = state.vaults.length > 1;
   return (
     <Box>
-      <Text bold>QuaiVault</Text>
-      <Text dimColor> · {env.identity}</Text>
-      {vault ? <Text> · {safeText(vault.label, 24)}</Text> : null}
+      <Text bold color="cyan">
+        QuaiVault
+      </Text>
+      <Text dimColor> {env.identity}</Text>
+      {vault ? (
+        <>
+          <Text dimColor> · </Text>
+          {many ? <Text dimColor>‹ </Text> : null}
+          <Text bold>{safeText(vault.label, 24)}</Text>
+          {vault.pending > 0 ? <Text color="yellow"> {vault.pending}</Text> : null}
+          {many ? (
+            <Text dimColor>
+              {' '}
+              › {state.selectedVault + 1}/{state.vaults.length}
+            </Text>
+          ) : null}
+        </>
+      ) : null}
       {state.load.status === 'degraded' ? (
         <Text color="red"> · indexer unavailable — lists are incomplete, not empty</Text>
       ) : null}
@@ -175,13 +267,27 @@ function Header({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactEl
   );
 }
 
+/**
+ * The menu bar, visually distinct from content.
+ *
+ * The active pane is reverse-video rather than merely coloured: on the many
+ * terminals where `dimColor` is a no-op, colour alone left every tab looking
+ * identical and there was no way to tell which pane you were in.
+ */
 function Tabs({ state }: { state: TuiState }): React.ReactElement {
   return (
     <Box>
-      {PANES.map((p) => (
-        <Text key={p} color={p === state.pane ? 'cyan' : undefined} dimColor={p !== state.pane}>
-          {p === state.pane ? `[${PANE_LABEL[p]}] ` : ` ${PANE_LABEL[p]}  `}
-        </Text>
+      {PANES.map((p, i) => (
+        <Box key={p}>
+          {i > 0 ? <Text dimColor>│</Text> : null}
+          {p === state.pane ? (
+            <Text inverse bold color="cyan">
+              {` ${PANE_LABEL[p]} `}
+            </Text>
+          ) : (
+            <Text dimColor>{` ${PANE_LABEL[p]} `}</Text>
+          )}
+        </Box>
       ))}
     </Box>
   );
@@ -203,7 +309,7 @@ function Body({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElem
     case 'history':
       return <HistoryPane state={state} env={env} />;
     case 'activity':
-      return <ActivityPane state={state} />;
+      return <ActivityPane state={state} env={env} />;
     case 'vault':
       return <VaultPane state={state} env={env} />;
     case 'recovery':
@@ -217,17 +323,21 @@ function Body({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElem
   }
 }
 
+/** The key legend, scoped to what the current pane can actually do. */
+function keyLegend(state: TuiState): string {
+  const vaults = state.vaults.length > 1 ? ' · [/] vault' : '';
+  if (state.detail) return 'a approve · x execute · q back';
+  if (state.pane === 'propose') return 'tab field · ←/→ kind · enter build · esc leave';
+  if (state.pane === 'recovery' && state.recovery) {
+    return `c cancel · a approve · x execute · tab pane${vaults} · r refresh · q quit`;
+  }
+  return `tab pane · j/k move · enter open${vaults} · r refresh · q quit`;
+}
+
 function Footer({ state }: { state: TuiState }): React.ReactElement {
-  const keys = state.detail
-    ? 'a approve · x execute · q back'
-    : state.pane === 'propose'
-      ? 'tab field · ←/→ kind · enter build · esc leave'
-      : state.pane === 'recovery' && state.recovery
-        ? 'c cancel recovery · tab pane · r refresh · q quit'
-        : 'tab pane · j/k move · enter open · r refresh · q quit';
   return (
     <Box flexDirection="column">
-      <Text dimColor>{keys}</Text>
+      <Text dimColor>{keyLegend(state)}</Text>
       {state.lastSignResult ? (
         <Text color={state.lastSignResult.ok ? 'green' : 'red'}>
           {state.lastSignResult.ok ? 'ok' : 'failed'}: {safeText(state.lastSignResult.message, 200)}

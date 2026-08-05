@@ -8,7 +8,9 @@ import {
   ProposePane,
   RecoveryPane,
   VaultPane,
+  BADGE_RESERVE,
 } from '../../src/tui/panes.js';
+import { abiSourceBadge } from '../../src/format/index.js';
 import type { TuiEnv } from '../../src/tui/env.js';
 import { initialState, reduce, type TuiRow, type TuiState } from '../../src/tui/reducer.js';
 import { analyzeBatch } from '../../src/abi/batch.js';
@@ -199,7 +201,7 @@ describe('VaultPane and RecoveryPane', () => {
 
 describe('ActivityPane and HistoryPane', () => {
   it('invites the user to wait rather than showing an empty box', () => {
-    const out = strip(renderToString(<ActivityPane state={initialState(10)} />));
+    const out = strip(renderToString(<ActivityPane state={initialState(10)} env={env} />));
     expect(out).toMatch(/fills as the chain moves/);
   });
 
@@ -211,7 +213,7 @@ describe('ActivityPane and HistoryPane', () => {
         entry: { at: 1_800_000_000, topic, type: 'INSERT', vault: ADDR.vault },
       });
     }
-    const out = strip(renderToString(<ActivityPane state={state} />));
+    const out = strip(renderToString(<ActivityPane state={state} env={env} />));
     expect(out.indexOf('transactions')).toBeLessThan(out.indexOf('owners'));
   });
 
@@ -249,5 +251,77 @@ describe('ProposePane', () => {
     const out = strip(renderToString(<ProposePane state={state} />));
     expect(out).toMatch(/re-reads the chain/);
     expect(out).toMatch(/before anything is signed/);
+  });
+});
+
+/**
+ * Column alignment.
+ *
+ * Guards a real regression: adjacent JSX expressions drop the separator space
+ * (`{pad(x, 12)} ` is trimmed before a newline), which slid every column after
+ * the first one column left and left the header pointing at the wrong data.
+ * A table whose header does not line up with its rows is worse than no header.
+ */
+describe('list panes line their columns up with the header', () => {
+  // Ink's `renderToString` lays out at 80 columns, so the pane must be told
+  // the same width or every row wraps and the assertions measure nothing.
+  const env80: TuiEnv = { ...env, width: 80 };
+
+  function lines(node: React.ReactElement): string[] {
+    return strip(renderToString(node)).split('\n').filter((l) => l.trim() !== '');
+  }
+
+  /**
+   * The inbox reserves a fixed number of columns for the badge. If a badge
+   * ever outgrows it the row silently wraps, so pin the assumption here rather
+   * than discovering it against a heuristically-decoded transaction.
+   */
+  it('reserves enough width for the longest provenance badge', () => {
+    for (const source of ['builtin', 'supplied', 'heuristic', 'none'] as const) {
+      expect(abiSourceBadge(source).text.length + 1).toBeLessThanOrEqual(BADGE_RESERVE);
+    }
+  });
+
+  it('inbox rows start each column where the header says they do', () => {
+    const state = reduce(initialState(10), {
+      type: 'data',
+      rows: [
+        row({ tx: fakeTx({ hash: `0x${'ab'.repeat(32)}`, summary: 'send 1 QUAI' }) }),
+        row({ vaultLabel: 'ops-multisig', tx: fakeTx({ hash: `0x${'cd'.repeat(32)}`, summary: 'addOwner' }) }),
+      ],
+      degraded: false,
+      at: 0,
+    });
+    const [head, first, second] = lines(<InboxPane state={state} env={env80} />);
+
+    expect(head).toBeDefined();
+    const vaultAt = head!.indexOf('VAULT');
+    const txAt = head!.indexOf('TX');
+    const apprAt = head!.indexOf('APPR');
+    const summaryAt = head!.indexOf('SUMMARY');
+
+    // The selected row carries a marker; the unselected one does not. Both
+    // must still place their cells under the header.
+    expect(first!.indexOf('treasury')).toBe(vaultAt);
+    expect(first!.indexOf('abababab')).toBe(txAt);
+    expect(first!.slice(apprAt).startsWith('1/2')).toBe(true);
+    expect(first!.indexOf('send 1 QUAI')).toBe(summaryAt);
+
+    expect(second!.indexOf('ops-multisig')).toBe(vaultAt);
+    expect(second!.indexOf('cdcdcdcd')).toBe(txAt);
+    expect(second!.indexOf('addOwner')).toBe(summaryAt);
+  });
+
+  it('a long summary is truncated rather than wrapped onto a second line', () => {
+    const state = reduce(initialState(10), {
+      type: 'data',
+      rows: [row({ tx: fakeTx({ summary: 'x'.repeat(400) }) })],
+      degraded: false,
+      at: 0,
+    });
+    // Header plus exactly one row. A wrapped row desynchronizes the rendered
+    // list from `viewport` and pushes the last transaction off a fixed-height
+    // screen.
+    expect(lines(<InboxPane state={state} env={env80} />)).toHaveLength(2);
   });
 });

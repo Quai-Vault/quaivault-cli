@@ -263,12 +263,24 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
       });
     }
 
-    case 'vaults':
+    case 'vaults': {
+      // Follow the *vault*, not the index — the same reason `reselect` follows
+      // a transaction hash. `loadVaults` returns owned-then-guardian in
+      // indexer order, so a vault appearing or disappearing shifts every index
+      // after it. Anchoring on the index means the cursor silently lands on a
+      // different vault, and the propose form builds against whatever it
+      // landed on.
+      const anchor = state.vaults[state.selectedVault]?.address.toLowerCase();
+      const moved = anchor
+        ? event.vaults.findIndex((v) => v.address.toLowerCase() === anchor)
+        : -1;
       return {
         ...state,
         vaults: event.vaults,
-        selectedVault: Math.min(state.selectedVault, Math.max(0, event.vaults.length - 1)),
+        selectedVault:
+          moved >= 0 ? moved : Math.min(state.selectedVault, Math.max(0, event.vaults.length - 1)),
       };
+    }
 
     case 'history':
       return clampScroll({
@@ -326,6 +338,35 @@ function cyclePane(state: TuiState, direction: 1 | -1): TuiState {
   return clampScroll({ ...state, pane: next, detail: false, selected: 0, scroll: 0 });
 }
 
+/**
+ * Move the vault cursor.
+ *
+ * The vault-scoped panes — history, vault, recovery — and the propose form all
+ * read `selectedVault`, so this is the one gesture that changes what four of
+ * the six panes are about. Their contents are **cleared rather than kept**:
+ * a reload is in flight, and the previous vault's owner set or history sitting
+ * under the new vault's label is a misread waiting to happen on a surface
+ * people approve from. Empty and briefly loading is honest; stale and
+ * mislabelled is not.
+ *
+ * `rows` deliberately survives — the inbox is cross-vault and does not change
+ * meaning when the vault cursor moves.
+ */
+function selectVault(state: TuiState, direction: 1 | -1): TuiState {
+  if (state.vaults.length < 2) return state;
+  const next = (state.selectedVault + direction + state.vaults.length) % state.vaults.length;
+  return clampScroll({
+    ...state,
+    selectedVault: next,
+    detail: false,
+    selected: state.pane === 'inbox' ? state.selected : 0,
+    scroll: state.pane === 'inbox' ? state.scroll : 0,
+    history: [],
+    vaultDetail: null,
+    recovery: null,
+  });
+}
+
 function reduceKey(state: TuiState, key: string): TuiState {
   // While a spawned signer owns the terminal, the TUI ignores input entirely.
   if (state.signing) return state;
@@ -366,6 +407,10 @@ function reduceKey(state: TuiState, key: string): TuiState {
       return clampScroll({ ...state, selected: 0 });
     case 'G':
       return clampScroll({ ...state, selected: Math.max(0, activeList(state).length - 1) });
+    case '[':
+      return selectVault(state, -1);
+    case ']':
+      return selectVault(state, 1);
     case 'return':
     case 'l':
       return activeList(state).length ? { ...state, detail: true } : state;

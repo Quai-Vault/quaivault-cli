@@ -9,11 +9,13 @@ import {
   missingFields,
   reduce,
   selectedRow,
+  selectedVault,
   visibleRows,
   ACTIVITY_LIMIT,
   type TuiEvent,
   type TuiRow,
   type TuiState,
+  type VaultSummary,
 } from '../../src/tui/reducer.js';
 import { mapKey } from '../../src/tui/keys.js';
 import { ADDR, fakeTx } from '../fake-client.js';
@@ -459,5 +461,108 @@ describe('the cursor follows the transaction, not the index', () => {
     const before = s.selected;
     s = reduce(s, { type: 'history', rows: [rowFor(H(9))] } as never);
     expect(s.selected).toBe(before);
+  });
+});
+
+/**
+ * The vault cursor.
+ *
+ * Four of the six panes — history, vault, recovery and the propose form — are
+ * scoped to it, so a wrong cursor is not a cosmetic bug: `formArgv` builds
+ * `qv propose … <vault>` against whatever it points at.
+ */
+describe('vault switching', () => {
+  const V = (n: number): VaultSummary => ({
+    address: `0x008${n}0000000000000000000000000000000000ab`,
+    label: `vault-${n}`,
+    pending: 0,
+    hasRecovery: false,
+  });
+
+  function withVaults(count: number): TuiState {
+    return reduce(initialState(10), {
+      type: 'vaults',
+      vaults: Array.from({ length: count }, (_, i) => V(i + 1)),
+    });
+  }
+
+  it('] advances the cursor and [ walks it back', () => {
+    let s = withVaults(3);
+    expect(selectedVault(s)?.label).toBe('vault-1');
+    s = press(s, ']');
+    expect(selectedVault(s)?.label).toBe('vault-2');
+    s = press(s, ']');
+    expect(selectedVault(s)?.label).toBe('vault-3');
+    s = press(s, '[');
+    expect(selectedVault(s)?.label).toBe('vault-2');
+  });
+
+  it('wraps in both directions', () => {
+    const s = withVaults(3);
+    expect(selectedVault(press(s, '['))?.label).toBe('vault-3');
+    expect(selectedVault(press(s, ']', ']', ']'))?.label).toBe('vault-1');
+  });
+
+  it('is a no-op with a single vault, so the keys are never a dead end', () => {
+    const s = withVaults(1);
+    expect(press(s, ']')).toBe(s);
+    expect(press(s, '[')).toBe(s);
+  });
+
+  /**
+   * The scoped panes describe the *previous* vault until the reload lands.
+   * Showing that under the new vault's label is a misread on a surface people
+   * approve from, so the switch blanks them.
+   */
+  it('clears the vault-scoped panes so nothing is shown under the wrong label', () => {
+    let s = withVaults(2);
+    s = reduce(s, { type: 'history', rows: rows(1) });
+    s = reduce(s, {
+      type: 'vault-detail',
+      detail: { owners: [ADDR.alice], threshold: 1, minExecutionDelay: 0, modules: [], balanceWei: 0n },
+    });
+    s = reduce(s, {
+      type: 'recovery',
+      detail: {
+        hash: `0x${'7'.repeat(64)}`,
+        newOwners: [ADDR.bob],
+        newThreshold: 1,
+        approvals: 1,
+        required: 2,
+      },
+    });
+    expect(s.history).toHaveLength(1);
+
+    s = press(s, ']');
+    expect(s.history).toEqual([]);
+    expect(s.vaultDetail).toBeNull();
+    expect(s.recovery).toBeNull();
+  });
+
+  it('leaves the cross-vault inbox alone — it does not change meaning', () => {
+    let s = reduce(withVaults(2), { type: 'data', rows: rows(3), degraded: false, at: 0 });
+    s = press(s, ']');
+    expect(s.rows).toHaveLength(3);
+  });
+
+  /**
+   * `loadVaults` returns owned-then-guardian in indexer order, so a vault
+   * appearing or disappearing shifts every index after it. Anchoring the
+   * cursor on the index silently lands it on a different vault.
+   */
+  it('follows the vault across a reorder rather than the index', () => {
+    let s = withVaults(3);
+    s = press(s, ']');
+    expect(selectedVault(s)?.label).toBe('vault-2');
+
+    s = reduce(s, { type: 'vaults', vaults: [V(3), V(2), V(1)] });
+    expect(selectedVault(s)?.label).toBe('vault-2');
+  });
+
+  it('clamps when the selected vault disappears entirely', () => {
+    let s = withVaults(3);
+    s = press(s, ']', ']');
+    s = reduce(s, { type: 'vaults', vaults: [V(1)] });
+    expect(selectedVault(s)?.label).toBe('vault-1');
   });
 });

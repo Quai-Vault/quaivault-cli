@@ -6,6 +6,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is `0.x`, minor bumps may contain breaking changes.
 
+## [0.2.0] — 2026-08-05
+
+### Added
+
+- **A vault cursor in the TUI — `[` and `]`.** Four of the six panes (history,
+  vault, recovery, and the propose form) are scoped to one vault, and there was
+  no way to change which one: `refresh` read `vaults[0]` and `selectedVault`
+  was initialised to `0` and never moved. With more than one vault only the
+  inbox was genuinely multi-vault, and `qv propose` from the form built against
+  whichever vault the indexer happened to return first.
+- **`qv tui` takes the whole terminal**, on the alternate screen buffer, the
+  way `htop` and `less` do, and gives it back untouched on exit. It steps *out*
+  of the alternate buffer before spawning a signer and back in afterwards, so
+  the child's §7 disclosure lands in real scrollback — the record of what you
+  approved should outlive the next redraw.
+- **Recovery approve and execute in the TUI** (`a` and `x` on the recovery
+  pane). The pane bound only `c` (cancel), so a guardian could watch a recovery
+  it could not approve. A guardian may own nothing, and therefore has no rows
+  in the transaction list where those keys otherwise live.
+- **Tables.** Column headers on the inbox, history and activity panes; the
+  content in a bordered region distinct from the menu; the active tab in
+  reverse video rather than colour alone, which `dimColor`-ignoring terminals
+  rendered identically to every other tab.
+
+### Fixed
+
+- **The TUI vault cursor followed an index through a reordering list.**
+  `loadVaults` returns owned-then-guardian in indexer order, so a vault
+  appearing or disappearing shifted every index after it and moved the cursor
+  onto a *different vault* — which the propose form would then build against.
+  It now follows the vault address across refreshes, the same way the
+  transaction cursor follows a hash.
+- **A refresh reset the vault-scoped panes to the first vault.** Refresh runs
+  on every chain event, so on a busy vault set the panes could not be kept on
+  the vault being looked at.
+- **Inbox rows wrapped when a transaction was decoded heuristically.** The
+  provenance badge `guessed from selector` is 21 columns and the layout
+  reserved 10, so the row ran past the edge onto a second line — which
+  desynchronizes the rendered list from the viewport and pushes a transaction
+  off the bottom of a fixed-height screen. A test now pins the reserve to the
+  longest badge.
+
 ## [0.1.1] — 2026-08-05
 
 No functional changes. `0.1.0` was published by hand because npm requires a

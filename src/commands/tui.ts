@@ -28,6 +28,33 @@ import { spawnSigner } from '../tui/spawn-signer.js';
 
 type Dispatch = (event: TuiEvent) => void;
 
+/**
+ * The alternate screen buffer — what `htop`, `btop`, `less` and `vim` use to
+ * own the terminal for the length of a run and hand it back with the user's
+ * scrollback intact.
+ *
+ * Guarded by a flag because the spawn path leaves and re-enters, and an
+ * unbalanced `?1049l` on a terminal that was never switched scrolls the user's
+ * history. Never written to a non-TTY: `run` already refuses those, but this
+ * is the function that would corrupt a redirected file if that check ever
+ * moved.
+ */
+const ALT_ENTER = '\u001B[?1049h';
+const ALT_LEAVE = '\u001B[?1049l';
+let inAltScreen = false;
+
+function enterAltScreen(): void {
+  if (inAltScreen || !process.stdout.isTTY) return;
+  process.stdout.write(ALT_ENTER);
+  inAltScreen = true;
+}
+
+function leaveAltScreen(): void {
+  if (!inAltScreen) return;
+  process.stdout.write(ALT_LEAVE);
+  inAltScreen = false;
+}
+
 function labelFor(ctx: AppContext, address: string): string {
   const found = Object.entries(ctx.config.aliases).find(
     ([, v]) => v.toLowerCase() === address.toLowerCase(),
@@ -92,14 +119,74 @@ interface PendingRecoveryRow {
 }
 
 /**
+ * Load the panes that describe **one** vault: detail, recovery and history.
+ *
+ * Split out of `refresh` so switching the vault cursor does not re-read every
+ * vault's pending set just to repaint three panes. Both callers dispatch the
+ * same three events, so a switch and a refresh leave the UI in the same shape.
+ */
+async function loadVaultScoped(
+  ctx: AppContext,
+  dispatch: Dispatch,
+  address: string,
+  identity: string,
+): Promise<void> {
+  const vault = ctx.qv.vault(address);
+  const [info, balances, history, pendingRecovery] = await Promise.all([
+    vault.info().catch(() => null),
+    vault.balances({ verify: false }).catch(() => null),
+    vault
+      .transactionHistory({ limit: 50 })
+      .then((p) => p.data)
+      .catch((): VaultTransaction[] => []),
+    vault.recovery.pending().catch(() => [] as PendingRecoveryRow[]),
+  ]);
+
+  dispatch({
+    type: 'vault-detail',
+    detail: info
+      ? {
+          owners: info.owners,
+          threshold: info.threshold,
+          minExecutionDelay: info.minExecutionDelay,
+          modules: [],
+          balanceWei: balances?.native ?? info.balance,
+        }
+      : null,
+  });
+
+  const first = (pendingRecovery as PendingRecoveryRow[])[0];
+  const recovery: RecoveryDetail | null = first
+    ? {
+        hash: first.hash,
+        newOwners: first.newOwners,
+        newThreshold: first.newThreshold,
+        approvals: first.approvalCount,
+        required: first.requiredThreshold,
+        ...(first.executionTime ? { executableAt: first.executionTime } : {}),
+        ...(first.expiration ? { expiration: first.expiration } : {}),
+      }
+    : null;
+  dispatch({ type: 'recovery', detail: recovery });
+
+  dispatch({ type: 'history', rows: await rowsFor(ctx, address, identity, history) });
+}
+
+/**
  * One refresh. The cross-vault inbox lands first so the default pane paints,
  * then the slower per-vault reads for the other panes.
+ *
+ * `preferred` is the vault the cursor is currently on. It is honoured when it
+ * still exists, so a refresh — which fires on every chain event — never yanks
+ * the vault-scoped panes back to whichever vault the indexer happened to
+ * return first. Returns the address actually shown, for the caller to keep.
  */
 async function refresh(
   ctx: AppContext,
   dispatch: Dispatch,
   vaultsOut: (vaults: string[]) => void,
-): Promise<void> {
+  preferred?: string,
+): Promise<string | undefined> {
   const identity = ctx.identity();
   if (!identity) throw new UsageError('No identity set.', 'qv use --as 0x…');
   dispatch({ type: 'loading' });
@@ -140,53 +227,17 @@ async function refresh(
   dispatch({ type: 'vaults', vaults: perVault.map((v) => v.summary) });
   dispatch({ type: 'data', rows: sortInbox(perVault.flatMap((v) => v.rows)), degraded, at: ctx.now() });
 
-  const address = vaults[0];
+  // Honour the cursor, not the indexer's ordering.
+  const address = vaults.find((v) => v.toLowerCase() === preferred?.toLowerCase()) ?? vaults[0];
   if (!address) {
     dispatch({ type: 'vault-detail', detail: null });
     dispatch({ type: 'recovery', detail: null });
     dispatch({ type: 'history', rows: [] });
-    return;
+    return undefined;
   }
 
-  const vault = ctx.qv.vault(address);
-  const [info, balances, history, pendingRecovery] = await Promise.all([
-    vault.info().catch(() => null),
-    vault.balances({ verify: false }).catch(() => null),
-    vault
-      .transactionHistory({ limit: 50 })
-      .then((p) => p.data)
-      .catch((): VaultTransaction[] => []),
-    vault.recovery.pending().catch(() => [] as PendingRecoveryRow[]),
-  ]);
-
-  dispatch({
-    type: 'vault-detail',
-    detail: info
-      ? {
-          owners: info.owners,
-          threshold: info.threshold,
-          minExecutionDelay: info.minExecutionDelay,
-          modules: [],
-          balanceWei: balances?.native ?? info.balance,
-        }
-      : null,
-  });
-
-  const first = (pendingRecovery as PendingRecoveryRow[])[0];
-  const recovery: RecoveryDetail | null = first
-    ? {
-        hash: first.hash,
-        newOwners: first.newOwners,
-        newThreshold: first.newThreshold,
-        approvals: first.approvalCount,
-        required: first.requiredThreshold,
-        ...(first.executionTime ? { executableAt: first.executionTime } : {}),
-        ...(first.expiration ? { expiration: first.expiration } : {}),
-      }
-    : null;
-  dispatch({ type: 'recovery', detail: recovery });
-
-  dispatch({ type: 'history', rows: await rowsFor(ctx, address, identity, history) });
+  await loadVaultScoped(ctx, dispatch, address, identity);
+  return address;
 }
 
 /** Subscribe within the channel budget; events become staleness and activity. */
@@ -269,14 +320,31 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
     let watching: { plan: ChannelPlan; close: () => void } | undefined;
     let vaults: string[] = [];
     let redraw: (() => void) | undefined;
+    /** The vault the cursor is on. Survives refreshes; drives the scoped panes. */
+    let currentVault: string | undefined;
     const frame: { clear?: () => void } = {};
 
     const doRefresh = async (dispatch: Dispatch): Promise<void> => {
       try {
-        await refresh(ctx, dispatch, (found) => {
-          vaults = found;
-        });
+        currentVault = await refresh(
+          ctx,
+          dispatch,
+          (found) => {
+            vaults = found;
+          },
+          currentVault,
+        );
         watching ??= subscribe(ctx, vaults, dispatch, () => redraw?.());
+      } catch (err) {
+        dispatch({ type: 'error', message: err instanceof Error ? err.message : 'load failed' });
+      }
+    };
+
+    /** Vault cursor moved: repaint the three scoped panes, nothing else. */
+    const onSelectVault = async (dispatch: Dispatch, address: string): Promise<void> => {
+      currentVault = address;
+      try {
+        await loadVaultScoped(ctx, dispatch, address, ctx.identity() ?? '');
       } catch (err) {
         dispatch({ type: 'error', message: err instanceof Error ? err.message : 'load failed' });
       }
@@ -284,14 +352,31 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
 
     /**
      * Hand the terminal over (§4.4, "drops raw mode, leaves the screen,
-     * spawns"). Ink's last frame is erased first so its diff is not fighting
-     * the child's output; the next state change redraws below it.
+     * spawns").
+     *
+     * We **leave the alternate screen before spawning and re-enter after**.
+     * The child's §7 disclosure is the record of what was approved and why;
+     * printed into the alternate buffer it would be erased the moment we
+     * redraw, taking the user's ability to scroll back over what they just
+     * signed with it. Dropping to the normal buffer puts the disclosure in
+     * real scrollback, where it survives the session.
      */
     const onSpawn = async (argv: string[]): Promise<{ ok: boolean; message: string }> => {
       frame.clear?.();
-      const outcome = await spawnSigner(argv);
-      return { ok: outcome.ok, message: outcome.message };
+      leaveAltScreen();
+      try {
+        const outcome = await spawnSigner(argv);
+        return { ok: outcome.ok, message: outcome.message };
+      } finally {
+        enterAltScreen();
+      }
     };
+
+    // btop/htop-style: take the whole terminal, and give it back untouched.
+    // Registered before the first write so an abnormal exit still restores.
+    const restore = (): void => leaveAltScreen();
+    process.once('exit', restore);
+    enterAltScreen();
 
     const app = ink.render(
       react.createElement(appModule.App, {
@@ -300,6 +385,7 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
           redraw = () => void doRefresh(dispatch);
           return doRefresh(dispatch);
         },
+        onSelectVault,
         onSpawn,
       }),
       { exitOnCtrlC: true },
@@ -310,6 +396,8 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
       await app.waitUntilExit();
     } finally {
       watching?.close();
+      leaveAltScreen();
+      process.removeListener('exit', restore);
     }
 
     return { data: { exited: true as const }, changed: false };

@@ -41,12 +41,99 @@ function Row({ label, value, tone }: { label: string; value: string; tone?: stri
   );
 }
 
+// ------------------------------------------------------------------ tables
+
+/**
+ * Sanitize, then clamp to exactly `width`.
+ *
+ * `safeText` guarantees the string is printable and bounded; the pad makes it
+ * *aligned*, which is what turns a list of fields into a table you can read
+ * down a column of. Exact width is what lets a selected row be highlighted as
+ * one continuous band rather than a row of ragged coloured words.
+ */
+function pad(value: string, width: number): string {
+  const w = Math.max(1, width);
+  const text = safeText(value, w);
+  return text.length > w ? text.slice(0, w) : text.padEnd(w);
+}
+
+export interface Column {
+  title: string;
+  width: number;
+}
+
+/**
+ * The column header.
+ *
+ * Present on every list pane, because the alternative is a grid of hashes and
+ * bare integers where `2/3` could as easily be a date. The two leading spaces
+ * align it past the selection marker.
+ */
+function TableHead({ columns }: { columns: readonly Column[] }): React.ReactElement {
+  return (
+    <Box>
+      <Text bold dimColor>
+        {`  ${columns.map((c) => pad(c.title, c.width)).join(' ')}`}
+      </Text>
+    </Box>
+  );
+}
+
+/** Width of the selection marker, which every row and the header allow for. */
+const MARKER = 2;
+
+/**
+ * Columns held back on the inbox for the provenance badge.
+ *
+ * Sized for the longest one — `guessed from selector`, 21 columns — plus its
+ * leading space. This was 10 on the first cut, which is fine until a
+ * heuristically-decoded transaction shows up and pushes the row twelve columns
+ * past the edge, wrapping it. `test/unit/panes.test.tsx` asserts no badge
+ * outgrows this.
+ */
+export const BADGE_RESERVE = 22;
+
+/**
+ * Remaining width for the final, flexible column.
+ *
+ * `reserve` is anything rendered *after* that column — the provenance badge on
+ * the inbox. Getting this wrong is not cosmetic: a row one column too wide
+ * wraps onto a second line, which desynchronizes the rendered rows from
+ * `viewport` and pushes the last transaction out of a fixed-height layout.
+ */
+function flexWidth(
+  total: number,
+  columns: readonly Column[],
+  reserve = 0,
+  min = 12,
+): number {
+  const fixed = columns.reduce((sum, c) => sum + c.width + 1, 0);
+  return Math.max(min, total - fixed - MARKER - reserve);
+}
+
+/**
+ * Cells joined into one string, single-spaced.
+ *
+ * Built as a template literal rather than adjacent JSX expressions on purpose:
+ * JSX strips whitespace before a newline, so `{pad(x, 12)} ` silently loses
+ * its separator and every column after it slides left by one.
+ */
+function cells(parts: readonly (readonly [string, number])[]): string {
+  return parts.map(([value, width]) => pad(value, width)).join(' ');
+}
+
 function who(env: TuiEnv, address: string): string {
   const name = env.contactName(address);
   return name ? `${address}  (${safeText(name, 40)})` : address;
 }
 
 // ------------------------------------------------------------------- inbox
+
+const INBOX_COLUMNS: readonly Column[] = [
+  { title: 'VAULT', width: 12 },
+  { title: 'TX', width: 8 },
+  { title: 'APPR', width: 5 },
+];
 
 export function InboxPane({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElement {
   const rows = visibleRows(state);
@@ -59,50 +146,75 @@ export function InboxPane({ state, env }: { state: TuiState; env: TuiEnv }): Rea
       </Text>
     );
   }
+  const summaryWidth = flexWidth(env.width, INBOX_COLUMNS, BADGE_RESERVE);
   return (
     <Box flexDirection="column">
+      <TableHead columns={[...INBOX_COLUMNS, { title: 'SUMMARY', width: summaryWidth }]} />
       {rows.map((row, i) => (
         <TxLine
           key={row.tx.hash}
           row={row}
           selected={state.scroll + i === state.selected}
-          width={env.width}
+          summaryWidth={summaryWidth}
         />
       ))}
     </Box>
   );
 }
 
+/**
+ * One inbox row.
+ *
+ * Selection is reverse-video across the whole line rather than a coloured
+ * marker. On a table the eye tracks the band, and the previous `❯` plus cyan
+ * text was easy to lose among the other coloured cells — on the surface where
+ * `a` approves whatever the cursor is on, "which row am I on" must not be a
+ * question.
+ */
 function TxLine({
   row,
   selected,
-  width,
+  summaryWidth,
 }: {
   row: TuiRow;
   selected: boolean;
-  width: number;
+  summaryWidth: number;
 }): React.ReactElement {
   const badge = abiSourceBadge(row.tx.abiSource);
-  // Width-aware rather than the old hardcoded 44 columns.
-  const summaryWidth = Math.max(12, width - 46);
+  const met = row.tx.approvalCount >= row.tx.threshold;
+  const approvals = `${row.tx.approvalCount}/${row.tx.threshold}`;
+
+  // The badge stays outside the highlight band and keeps its tone. It is a
+  // provenance signal — "this calldata was not decoded from a known ABI" — and
+  // dropping it to reverse-video on the selected row would mute the warning on
+  // exactly the row the user is about to act on.
+  const provenance =
+    row.tx.abiSource !== 'builtin' ? (
+      <Text color={toneColor(badge.tone)}>{` ${badge.text}`}</Text>
+    ) : null;
+
+  if (selected) {
+    return (
+      <Box>
+        <Text inverse>
+          {`❯ ${cells([
+            [row.vaultLabel, 12],
+            [row.tx.hash.slice(2, 10), 8],
+            [approvals, 5],
+            [row.tx.summary, summaryWidth],
+          ])}`}
+        </Text>
+        {provenance}
+      </Box>
+    );
+  }
   return (
     <Box>
-      <Text color={selected ? 'cyan' : undefined}>{selected ? '❯ ' : '  '}</Text>
-      <Box width={12}>
-        <Text dimColor>{safeText(row.vaultLabel, 12)}</Text>
-      </Box>
-      <Box width={10}>
-        <Text>{row.tx.hash.slice(2, 10)}</Text>
-      </Box>
-      <Box width={6}>
-        <Text color={row.tx.approvalCount >= row.tx.threshold ? 'green' : undefined}>
-          {row.tx.approvalCount}/{row.tx.threshold}
-        </Text>
-      </Box>
-      <Box width={summaryWidth}>
-        <Text wrap="truncate">{safeText(row.tx.summary, 200)}</Text>
-      </Box>
-      {row.tx.abiSource !== 'builtin' && <Text color={toneColor(badge.tone)}> {badge.text}</Text>}
+      <Text dimColor>{`  ${pad(row.vaultLabel, 12)} `}</Text>
+      <Text>{`${pad(row.tx.hash.slice(2, 10), 8)} `}</Text>
+      <Text color={met ? 'green' : undefined}>{`${pad(approvals, 5)} `}</Text>
+      <Text>{pad(row.tx.summary, summaryWidth)}</Text>
+      {provenance}
     </Box>
   );
 }
@@ -296,30 +408,36 @@ export function RecoveryPane({ state, env }: { state: TuiState; env: TuiEnv }): 
       <Row label="New threshold" value={String(r.newThreshold)} />
       <Box height={1} />
       <Text color="cyan">Press c to cancel this recovery. Cancelling is the defensive action.</Text>
+      <Text dimColor>
+        a approves it as a guardian · x executes it once the delay has elapsed. Each opens a
+        separate process that shows you the new owner set before signing.
+      </Text>
     </Box>
   );
 }
 
 // ---------------------------------------------------------------- activity
 
-export function ActivityPane({ state }: { state: TuiState }): React.ReactElement {
+const ACTIVITY_COLUMNS: readonly Column[] = [
+  { title: 'TIME', width: 8 },
+  { title: 'TOPIC', width: 16 },
+  { title: 'TYPE', width: 10 },
+];
+
+export function ActivityPane({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElement {
   if (!state.activity.length) {
     return <Text dimColor>No events yet. This fills as the chain moves.</Text>;
   }
+  const vaultWidth = flexWidth(env.width, ACTIVITY_COLUMNS);
   return (
     <Box flexDirection="column">
+      <TableHead columns={[...ACTIVITY_COLUMNS, { title: 'VAULT', width: vaultWidth }]} />
       {state.activity.slice(0, state.viewport).map((e, i) => (
         <Box key={`${e.at}-${i}`}>
-          <Box width={10}>
-            <Text dimColor>{formatAbsolute(e.at).slice(11, 19)}</Text>
-          </Box>
-          <Box width={16}>
-            <Text color="cyan">{e.topic}</Text>
-          </Box>
-          <Box width={10}>
-            <Text dimColor>{e.type}</Text>
-          </Box>
-          <Text dimColor>{e.vault.slice(0, 10)}…</Text>
+          <Text dimColor>{`  ${pad(formatAbsolute(e.at).slice(11, 19), 8)} `}</Text>
+          <Text color="cyan">{`${pad(e.topic, 16)} `}</Text>
+          <Text dimColor>{`${pad(e.type, 10)} `}</Text>
+          <Text dimColor>{pad(e.vault, vaultWidth)}</Text>
         </Box>
       ))}
     </Box>
@@ -328,32 +446,48 @@ export function ActivityPane({ state }: { state: TuiState }): React.ReactElement
 
 // ----------------------------------------------------------------- history
 
+const HISTORY_COLUMNS: readonly Column[] = [
+  { title: 'TX', width: 8 },
+  { title: 'AGE', width: 11 },
+  { title: 'STATUS', width: 10 },
+];
+
 export function HistoryPane({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElement {
   const rows = visibleRows(state);
   if (!rows.length) return <Text dimColor>No history for this vault.</Text>;
+  const summaryWidth = flexWidth(env.width, HISTORY_COLUMNS);
   return (
     <Box flexDirection="column">
-      {rows.map((row, i) => (
-        <Box key={row.tx.hash}>
-          <Text color={state.scroll + i === state.selected ? 'cyan' : undefined}>
-            {state.scroll + i === state.selected ? '❯ ' : '  '}
-          </Text>
-          <Box width={10}>
-            <Text>{row.tx.hash.slice(2, 10)}</Text>
-          </Box>
-          <Box width={12}>
-            <Text dimColor>{formatApproximateAge(row.tx.proposedAtBlock, row.chainHead) ?? ''}</Text>
-          </Box>
-          <Box width={11}>
-            <Text color={row.tx.status === 'executed' ? 'green' : row.tx.status === 'failed' ? 'red' : 'yellow'}>
-              {row.tx.status}
+      <TableHead columns={[...HISTORY_COLUMNS, { title: 'SUMMARY', width: summaryWidth }]} />
+      {rows.map((row, i) => {
+        const selected = state.scroll + i === state.selected;
+        const age = formatApproximateAge(row.tx.proposedAtBlock, row.chainHead) ?? '';
+        const line = cells([
+          [row.tx.hash.slice(2, 10), 8],
+          [age, 11],
+          [row.tx.status, 10],
+          [row.tx.summary, summaryWidth],
+        ]);
+        if (selected) {
+          return (
+            <Text key={row.tx.hash} inverse>{`❯ ${line}`}</Text>
+          );
+        }
+        return (
+          <Box key={row.tx.hash}>
+            <Text>{`  ${pad(row.tx.hash.slice(2, 10), 8)} `}</Text>
+            <Text dimColor>{`${pad(age, 11)} `}</Text>
+            <Text
+              color={
+                row.tx.status === 'executed' ? 'green' : row.tx.status === 'failed' ? 'red' : 'yellow'
+              }
+            >
+              {`${pad(row.tx.status, 10)} `}
             </Text>
+            <Text>{pad(row.tx.summary, summaryWidth)}</Text>
           </Box>
-          <Box width={Math.max(12, env.width - 48)}>
-            <Text wrap="truncate">{safeText(row.tx.summary, 200)}</Text>
-          </Box>
-        </Box>
-      ))}
+        );
+      })}
     </Box>
   );
 }
