@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is `0.x`, minor bumps may contain breaking changes.
 
+## [0.1.1] — 2026-08-05
+
+No functional changes. `0.1.0` was published by hand because npm requires a
+package to exist before a trusted publisher can be configured for it; this
+release exists to prove the tag-triggered path in `.github/workflows/release.yml`
+publishes via OIDC, with provenance and without a long-lived token. The tree is
+identical to `v0.1.0` apart from the version and this entry.
+
 ## [0.1.0] — 2026-08-03
 
 First release. Built against `@quaivault/sdk` 0.6.0, pinned exactly.

@@ -1,6 +1,6 @@
 {
   "name": "@quaivault/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Command-line client for QuaiVault multisig vaults on Quai Network",
   "license": "MIT",
   "author": "QuaiVault",
