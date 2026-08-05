@@ -82,7 +82,7 @@ export function App({
   onSpawn,
   onSubscribe,
 }: AppProps): React.ReactElement {
-  const { exit } = useApp();
+  const { exit, suspendTerminal } = useApp();
   const { stdout } = useStdout();
   const size = useWindowSize();
   const [state, dispatch] = useReducer(reduce, seed ?? initialState());
@@ -156,18 +156,39 @@ export function App({
     const row = selectedRow(state);
     const vault = selectedVault(state);
 
-    /** Everything that changes the chain leaves the process here. */
+    /**
+     * Everything that changes the chain leaves the process here.
+     *
+     * Wrapped in `suspendTerminal`, which is the part that was missing: it
+     * calls Ink's `pauseInput` — raw mode off, bracketed paste off, the stdin
+     * listener detached and the handle unref'd — before the child starts.
+     * Without it Ink kept reading the same file descriptor the child was
+     * reading, and the two processes split the bytes between them, so roughly
+     * every second character of a typed password went to the TUI and was
+     * discarded. Erasing the frame with `clear()` did nothing about that.
+     *
+     * It also takes the terminal out of the alternate screen for the child's
+     * §7 disclosure and puts it back afterwards, which is what the hand-rolled
+     * escape sequences here used to do.
+     */
     const spawn = (argv: string[], action: string, hash: string): void => {
       busy.current = true;
       dispatch({ type: 'sign-start', hash, action });
-      void onSpawn(argv)
-        .then((outcome) => {
+      void (async () => {
+        let outcome = { ok: false, message: 'failed' };
+        try {
+          // Assigned inside the callback rather than dispatched from it: Ink
+          // discards renders while suspended, so the result is applied once
+          // the terminal is ours again and the redraw will actually show it.
+          await suspendTerminal(async () => {
+            outcome = await onSpawn(argv);
+          });
+        } finally {
           dispatch({ type: 'sign-end', ok: outcome.ok, message: outcome.message });
-          return onRefresh(dispatch);
-        })
-        .finally(() => {
+          await onRefresh(dispatch);
           busy.current = false;
-        });
+        }
+      })();
     };
 
     if (state.pane === 'propose' && mapped === 'return' && state.form.field >= 0 && vault) {

@@ -6,6 +6,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is `0.x`, minor bumps may contain breaking changes.
 
+## [0.3.1] — 2026-08-05
+
+### Fixed
+
+- **Roughly every second character of a typed password was swallowed.** The
+  TUI erased its frame before spawning a signer but left raw mode on and its
+  stdin listener attached, so Ink went on reading the same file descriptor the
+  child was reading and the two processes split the byte stream between them.
+  The characters the TUI won were discarded as unhandled keys. Spawning now
+  goes through Ink's `suspendTerminal`, which turns raw mode off, unrefs stdin
+  and detaches the listener before the child starts — so the child owns the
+  terminal outright, which is what §4.4's "drops raw mode, leaves the screen,
+  spawns" always meant.
+
+- **`q` left the process running and the shell without a prompt.** Quitting
+  unmounted the app but never ended the process: `@supabase/realtime-js`
+  starts a heartbeat `setInterval` and opens a WebSocket, unrefs neither, and
+  the SDK keeps that client private with no disconnect — so once a vault was
+  being watched the event loop could not drain, and `main()` sets
+  `process.exitCode` and returns rather than exiting. Ctrl-C worked only
+  because the SIGINT handler calls `process.exit` outright, which is also why
+  `qv watch` never showed it. Channel unsubscribes are awaited now instead of
+  fired and forgotten, and `qv tui` exits deliberately when it is done.
+
+### Changed
+
+- The alternate screen is Ink's `alternateScreen` option rather than escape
+  sequences written by hand. Ink already leaves and re-enters it around a
+  suspension and restores the primary screen on unmount, including on a
+  signal; the hand-rolled version could not, so a spawned signer's disclosure
+  would have been printed into the buffer it was meant to be kept out of.
+
 ## [0.3.0] — 2026-08-05
 
 ### Fixed

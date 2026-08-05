@@ -1,5 +1,6 @@
 import type { Affordance, Subscription, VaultTransaction, WatchEvent } from '@quaivault/sdk';
 import type { CommandSpec } from '../cli/spec.js';
+import { ExitCode } from '../cli/exit.js';
 import { UsageError, type AppContext } from '../context/context.js';
 import { batchOf } from '../render/transaction.js';
 import { ChangeFeed } from '../store/index.js';
@@ -27,33 +28,6 @@ import { spawnSigner } from '../tui/spawn-signer.js';
  */
 
 type Dispatch = (event: TuiEvent) => void;
-
-/**
- * The alternate screen buffer — what `htop`, `btop`, `less` and `vim` use to
- * own the terminal for the length of a run and hand it back with the user's
- * scrollback intact.
- *
- * Guarded by a flag because the spawn path leaves and re-enters, and an
- * unbalanced `?1049l` on a terminal that was never switched scrolls the user's
- * history. Never written to a non-TTY: `run` already refuses those, but this
- * is the function that would corrupt a redirected file if that check ever
- * moved.
- */
-const ALT_ENTER = '\u001B[?1049h';
-const ALT_LEAVE = '\u001B[?1049l';
-let inAltScreen = false;
-
-function enterAltScreen(): void {
-  if (inAltScreen || !process.stdout.isTTY) return;
-  process.stdout.write(ALT_ENTER);
-  inAltScreen = true;
-}
-
-function leaveAltScreen(): void {
-  if (!inAltScreen) return;
-  process.stdout.write(ALT_LEAVE);
-  inAltScreen = false;
-}
 
 function labelFor(ctx: AppContext, address: string): string {
   const found = Object.entries(ctx.config.aliases).find(
@@ -246,7 +220,7 @@ function subscribe(
   vaults: readonly string[],
   dispatch: Dispatch,
   onChange: () => void,
-): { plan: ChannelPlan; close: () => void } {
+): { plan: ChannelPlan; close: () => Promise<void> } {
   const plan = planChannels(vaults);
   const feed = new ChangeFeed(ctx.store);
   const subs: Subscription[] = [];
@@ -272,15 +246,12 @@ function subscribe(
   }
   return {
     plan,
-    close: () => {
+    close: async () => {
       off();
-      for (const sub of subs) {
-        try {
-          void sub.unsubscribe();
-        } catch {
-          // Teardown races process exit; nothing useful to do.
-        }
-      }
+      // Awaited rather than fired and forgotten. `unsubscribe` returns a
+      // promise that closes a Realtime channel; dropping it left channels
+      // half-torn-down at exit.
+      await Promise.allSettled(subs.map((sub) => sub.unsubscribe()));
     },
   };
 }
@@ -317,12 +288,11 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
       width: process.stdout.columns ?? 100,
     };
 
-    let watching: { plan: ChannelPlan; close: () => void } | undefined;
+    let watching: { plan: ChannelPlan; close: () => Promise<void> } | undefined;
     let vaults: string[] = [];
     let redraw: (() => void) | undefined;
     /** The vault the cursor is on. Survives refreshes; drives the scoped panes. */
     let currentVault: string | undefined;
-    const frame: { clear?: () => void } = {};
 
     const doRefresh = async (dispatch: Dispatch): Promise<void> => {
       try {
@@ -354,29 +324,15 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
      * Hand the terminal over (§4.4, "drops raw mode, leaves the screen,
      * spawns").
      *
-     * We **leave the alternate screen before spawning and re-enter after**.
-     * The child's §7 disclosure is the record of what was approved and why;
-     * printed into the alternate buffer it would be erased the moment we
-     * redraw, taking the user's ability to scroll back over what they just
-     * signed with it. Dropping to the normal buffer puts the disclosure in
-     * real scrollback, where it survives the session.
+     * The dropping and the leaving are `suspendTerminal`'s job now — the App
+     * wraps this call in it. Ink turns raw mode off, unrefs stdin, detaches
+     * its listener, exits the alternate screen for the child's §7 disclosure,
+     * and reverses all of it afterwards.
      */
     const onSpawn = async (argv: string[]): Promise<{ ok: boolean; message: string }> => {
-      frame.clear?.();
-      leaveAltScreen();
-      try {
-        const outcome = await spawnSigner(argv);
-        return { ok: outcome.ok, message: outcome.message };
-      } finally {
-        enterAltScreen();
-      }
+      const outcome = await spawnSigner(argv);
+      return { ok: outcome.ok, message: outcome.message };
     };
-
-    // btop/htop-style: take the whole terminal, and give it back untouched.
-    // Registered before the first write so an abnormal exit still restores.
-    const restore = (): void => leaveAltScreen();
-    process.once('exit', restore);
-    enterAltScreen();
 
     const app = ink.render(
       react.createElement(appModule.App, {
@@ -388,19 +344,38 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
         onSelectVault,
         onSpawn,
       }),
-      { exitOnCtrlC: true },
+      // btop/htop-style, and Ink's own option rather than hand-written escape
+      // sequences: it knows to leave the alternate screen around a suspension
+      // and to restore the primary screen on unmount, including on a signal.
+      { exitOnCtrlC: true, alternateScreen: true },
     );
-    frame.clear = () => app.clear();
 
     try {
       await app.waitUntilExit();
     } finally {
-      watching?.close();
-      leaveAltScreen();
-      process.removeListener('exit', restore);
+      // Awaited, not fired and forgotten: each one closes a Realtime channel.
+      await watching?.close();
     }
 
-    return { data: { exited: true as const }, changed: false };
+    /**
+     * Leave deliberately, because nothing else can.
+     *
+     * `@supabase/realtime-js` opens a WebSocket and starts a heartbeat
+     * `setInterval`, and unrefs neither; the SDK keeps that client private and
+     * exposes no disconnect, only per-channel removal. So once `watch()` has
+     * been called the event loop can never drain, and `main()` sets
+     * `process.exitCode` and returns rather than exiting. The visible symptom
+     * was pressing `q`, watching the app disappear, and getting no shell
+     * prompt back without Ctrl-C.
+     *
+     * `qv watch` never showed this because SIGINT is its only exit path, and
+     * the SIGINT handler in `bin/qv.ts` calls `process.exit` outright.
+     *
+     * Safe here: the TUI renders nothing on the way out (`render` returns
+     * undefined, and there is no `--json` form), and writes to a TTY are
+     * synchronous, so Ink's screen restore has already landed.
+     */
+    process.exit(ExitCode.Ok);
   },
 
   render: () => undefined,
