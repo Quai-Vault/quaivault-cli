@@ -2,12 +2,19 @@ import type { Affordance, Subscription, VaultTransaction, WatchEvent } from '@qu
 import type { CommandSpec } from '../cli/spec.js';
 import { ExitCode } from '../cli/exit.js';
 import { UsageError, type AppContext } from '../context/context.js';
+import { POLICY_FIELDS, loadPolicy, policyValue } from '../context/policy.js';
 import { batchOf } from '../render/transaction.js';
 import { ChangeFeed } from '../store/index.js';
 import { planChannels, type ChannelPlan } from '../store/channels.js';
 import type { TuiEnv } from '../tui/env.js';
-import type { RecoveryDetail, TuiEvent, TuiRow, VaultSummary } from '../tui/reducer.js';
-import { spawnSigner } from '../tui/spawn-signer.js';
+import type {
+  PolicyLine,
+  RecoveryDetail,
+  TuiEvent,
+  TuiRow,
+  VaultSummary,
+} from '../tui/reducer.js';
+import { holdUntilAcknowledged, spawnSigner } from '../tui/spawn-signer.js';
 
 /**
  * `qv tui` — a full-screen monitoring and review surface.
@@ -28,6 +35,13 @@ import { spawnSigner } from '../tui/spawn-signer.js';
  */
 
 type Dispatch = (event: TuiEvent) => void;
+
+/** The policy as display lines, or null when there is no policy file. */
+function policyLines(): PolicyLine[] | null {
+  const policy = loadPolicy();
+  if (!policy) return null;
+  return POLICY_FIELDS.map((field) => ({ field, value: policyValue(policy, field) }));
+}
 
 function labelFor(ctx: AppContext, address: string): string {
   const found = Object.entries(ctx.config.aliases).find(
@@ -171,6 +185,11 @@ async function refresh(
   ]);
   vaultsOut(vaults);
   const degraded = health?.available === false;
+
+  // A local file read, so it rides along with every refresh — including the
+  // one that runs after `qv policy set` returns, which is what makes an edit
+  // appear applied.
+  dispatch({ type: 'policy', lines: policyLines() });
 
   // Indexed rather than pushed. Pushing from inside `Promise.all` orders the
   // list by whichever vault's reads happen to resolve first, so the inbox
@@ -331,6 +350,13 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
      */
     const onSpawn = async (argv: string[]): Promise<{ ok: boolean; message: string }> => {
       const outcome = await spawnSigner(argv);
+      // 130 is Ctrl-C: the user is already leaving and does not need a prompt
+      // explaining why. Everything else gets read before the screen flips back.
+      if (!outcome.ok && outcome.exitCode !== 130) {
+        await holdUntilAcknowledged(
+          `\n  ${outcome.message} — the reason is printed above.\n  Press any key to return. `,
+        );
+      }
       return { ok: outcome.ok, message: outcome.message };
     };
 

@@ -6,6 +6,58 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is `0.x`, minor bumps may contain breaking changes.
 
+## [0.4.0] — 2026-08-06
+
+### Fixed
+
+- **`qv inbox` never showed a guardian anything.** It read only
+  `pendingTransactions()` and returned early when a vault had none — which is
+  exactly the shape of a vault you guard but do not own. So the one thing a
+  guardian exists to act on never reached the inbox, and `--count`, which a
+  shell prompt reads, said zero while a recovery sat waiting. Pending
+  recoveries are now read before that return, bucketed by
+  `recovery.affordances()`, and shown first in their own section: to a guardian
+  a recovery is the job, and to an owner it is someone replacing the entire
+  owner set. `invalidatedBy` gained `recoveries`, without which a recovery
+  could land and the cached inbox would not notice.
+
+- **A failed action in the TUI reported only "refused: precondition or
+  policy".** The spawned child prints the real reason to the primary screen,
+  and Ink re-entered the alternate screen and redrew the instant it exited, so
+  the message was gone before it could be read — and exit 3 covers everything
+  from a wrong keystore password to a policy allowlist to a key that does not
+  match the identity. The TUI now holds the screen after a failure until you
+  press a key.
+
+### Added
+
+- **A `policy` pane in the TUI**, and the one-shot commands underneath it:
+  `qv policy set <field> <value>`, `qv policy unset <field>`, and a `qv policy
+  show` that prints the actual values rather than only the file's path. The
+  pane is read-only until `e`.
+
+  The TUI never writes the policy file. It spawns `qv policy set`, which is
+  where validation and the write live — otherwise the TUI would hold a
+  capability the one-shot surface lacks, and the pane could drift into a
+  second, laxer implementation of the bound it displays.
+
+  **`qv policy set` refuses without a terminal, and has no override flag.** The
+  policy bounds what a non-interactive caller may sign; a non-interactive
+  caller that can widen its own bound is not bounded, and an agent emits
+  `--yes` as readily as it emits anything else. Provisioning a machine means
+  writing the file directly, as it always did.
+
+  The writer regenerates the commented file rather than bare keys. The comments
+  are the only place the reasoning lives — why `deny_delegatecall` should stay
+  true, what `builtin` means — and a tool that quietly stripped them would make
+  the file less safe every time somebody changed a number.
+  `require_abi_source` cannot be emptied: "sign anything, however it was
+  decoded" is the opposite of a bound, and it would be reached by clearing a
+  field.
+
+- `qv inbox --json` carries `recoveries`, plus `counts.recoveriesPending` and
+  `counts.recoveriesNeedingYou`.
+
 ## [0.3.1] — 2026-08-05
 
 ### Fixed

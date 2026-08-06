@@ -16,17 +16,38 @@ import type { BatchAnalysis } from '../abi/batch.js';
 
 // ------------------------------------------------------------------- panes
 
-export type Pane = 'inbox' | 'history' | 'activity' | 'vault' | 'recovery' | 'propose';
+export type Pane =
+  | 'inbox'
+  | 'history'
+  | 'activity'
+  | 'vault'
+  | 'recovery'
+  | 'policy'
+  | 'propose';
 
-/** Tab order. Monitoring panes first, the one that writes last. */
+/** Tab order. Monitoring panes first, the ones that write last. */
 export const PANES: readonly Pane[] = [
   'inbox',
   'history',
   'activity',
   'vault',
   'recovery',
+  'policy',
   'propose',
 ];
+
+/**
+ * One line of the policy, as text.
+ *
+ * The reducer is handed rendered strings rather than a `Policy`: parsing and
+ * validation belong to `qv policy set`, which is what actually writes the
+ * file. The TUI shows what is there and produces argv, exactly as the propose
+ * form does — it must not become a second implementation of the bound.
+ */
+export interface PolicyLine {
+  field: string;
+  value: string;
+}
 
 export interface TuiRow {
   vault: string;
@@ -188,6 +209,11 @@ export interface TuiState {
   activity: ActivityEntry[];
   vaultDetail: VaultDetail | null;
   recovery: RecoveryDetail | null;
+  /** Null means no policy file exists, which is not the same as an empty one. */
+  policy: PolicyLine[] | null;
+  policyField: number;
+  /** The edit buffer. Null means not editing — the pane is read-only then. */
+  policyEdit: string | null;
   selected: number;
   scroll: number;
   viewport: number;
@@ -210,6 +236,8 @@ export type TuiEvent =
   | { type: 'history'; rows: TuiRow[] }
   | { type: 'vault-detail'; detail: VaultDetail | null }
   | { type: 'recovery'; detail: RecoveryDetail | null }
+  | { type: 'policy'; lines: PolicyLine[] | null }
+  | { type: 'policy-edit'; value: string | null }
   | { type: 'activity'; entry: ActivityEntry }
   | { type: 'loading' }
   | { type: 'error'; message: string }
@@ -251,6 +279,9 @@ export function initialState(viewport = 10): TuiState {
     activity: [],
     vaultDetail: null,
     recovery: null,
+    policy: null,
+    policyField: 0,
+    policyEdit: null,
     selected: 0,
     scroll: 0,
     viewport,
@@ -351,6 +382,16 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
     case 'recovery':
       return { ...state, recovery: event.detail };
 
+    case 'policy':
+      return {
+        ...state,
+        policy: event.lines,
+        policyField: Math.min(state.policyField, Math.max(0, (event.lines?.length ?? 1) - 1)),
+      };
+
+    case 'policy-edit':
+      return { ...state, policyEdit: event.value };
+
     case 'activity':
       return { ...state, activity: [event.entry, ...state.activity].slice(0, ACTIVITY_LIMIT) };
 
@@ -444,6 +485,11 @@ function reduceKey(state: TuiState, key: string): TuiState {
     if (KIND_SELECTOR_KEYS.has(key)) return reduceForm(state, key);
   }
 
+  if (state.pane === 'policy' && !state.detail) {
+    const handled = reducePolicy(state, key);
+    if (handled) return handled;
+  }
+
   switch (key) {
     case 'tab':
       return cyclePane(state, 1);
@@ -475,6 +521,50 @@ function reduceKey(state: TuiState, key: string): TuiState {
       return activeList(state).length ? { ...state, detail: true } : state;
     default:
       return state;
+  }
+}
+
+/**
+ * Policy pane key handling. Returns `null` for keys it does not claim, so
+ * `tab`, `q` and `r` keep their meaning and the pane is never a trap.
+ *
+ * Read-only until you press `e`. The pane shows the bound on non-interactive
+ * signing, and a surface where the cursor resting on `deny_delegatecall` and a
+ * stray keystroke could change it is not a surface for this file.
+ */
+function reducePolicy(state: TuiState, key: string): TuiState | null {
+  const lines = state.policy ?? [];
+
+  if (state.policyEdit !== null) {
+    switch (key) {
+      case 'escape':
+        return { ...state, policyEdit: null };
+      case 'return':
+        // The App reads the buffer and spawns `qv policy set`. Leaving the
+        // state alone here means a failed write does not silently look applied.
+        return state;
+      case 'backspace':
+        return { ...state, policyEdit: state.policyEdit.slice(0, -1) };
+      case 'ctrl-u':
+        return { ...state, policyEdit: '' };
+      default:
+        if (key.length !== 1 || key < ' ') return state;
+        return { ...state, policyEdit: state.policyEdit + key };
+    }
+  }
+
+  switch (key) {
+    case 'j':
+    case 'down':
+      return { ...state, policyField: Math.min(state.policyField + 1, Math.max(0, lines.length - 1)) };
+    case 'k':
+    case 'up':
+      return { ...state, policyField: Math.max(0, state.policyField - 1) };
+    case 'e':
+    case 'return':
+      return lines.length ? { ...state, policyEdit: lines[state.policyField]?.value ?? '' } : state;
+    default:
+      return null;
   }
 }
 
@@ -578,6 +668,16 @@ function reduceForm(state: TuiState, key: string): TuiState {
  */
 function reducePaste(state: TuiState, text: string): TuiState {
   if (state.signing) return state;
+
+  // The policy edit buffer takes a paste too — `allow_to` is a list of
+  // addresses, which nobody types either.
+  if (state.pane === 'policy' && !state.detail && state.policyEdit !== null) {
+    const cleaned = text.replace(CONTROL_OR_FORMAT, '').trim();
+    if (!cleaned) return state;
+    const next = state.policyEdit + cleaned;
+    return next.length > MAX_FIELD_LENGTH ? state : { ...state, policyEdit: next };
+  }
+
   if (state.pane !== 'propose' || state.detail || state.form.field < 0) return state;
 
   const field = FORM_FIELDS[state.form.kind][state.form.field];

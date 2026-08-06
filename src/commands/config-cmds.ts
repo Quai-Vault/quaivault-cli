@@ -1,8 +1,18 @@
 import { inspectAddress } from '@quaivault/sdk';
 import type { CommandSpec } from '../cli/spec.js';
-import { UsageError } from '../context/context.js';
+import { PreconditionError, UsageError } from '../context/context.js';
 import { loadConfig, saveConfig, configPath } from '../context/config.js';
-import { policyPath, writeStarterPolicy, loadPolicy } from '../context/policy.js';
+import {
+  POLICY_FIELDS,
+  loadPolicy,
+  policyPath,
+  policyValue,
+  savePolicy,
+  withPolicyField,
+  writeStarterPolicy,
+  type Policy,
+  type PolicyField,
+} from '../context/policy.js';
 import { span } from '../format/tone.js';
 import { safeText } from '../format/index.js';
 
@@ -158,33 +168,95 @@ export const contactCommand: CommandSpec<
   outputSchema: { type: 'object', properties: { contacts: { type: 'object' } } },
 };
 
+interface PolicyData {
+  path: string;
+  exists: boolean;
+  created: boolean;
+  /** Field → rendered value, when a policy exists. */
+  fields: { field: string; value: string }[];
+  changedField?: string;
+}
+
 export const policyCommand: CommandSpec<
-  { action?: string },
-  { path: string; exists: boolean; created: boolean }
+  { action?: string; field?: string; value?: string },
+  PolicyData
 > = {
   path: ['policy'],
   describe: 'The bound on non-interactive signing',
-  args: [{ name: 'action', description: 'init | show' }],
+  args: [
+    { name: 'action', description: 'init | show | set | unset' },
+    { name: 'field', description: `for set/unset: ${POLICY_FIELDS.join(' | ')}` },
+    { name: 'value', description: 'for set: the new value' },
+  ],
 
-  async run(_ctx, input) {
+  async run(ctx, input) {
     const action = input.action ?? 'show';
     const path = policyPath();
+
     if (action === 'init') {
       if (loadPolicy(path)) {
         throw new UsageError(
           `A policy already exists at ${path}.`,
-          'Edit it directly; this command will not overwrite it.',
+          'Edit it directly, or change one field with `qv policy set`.',
         );
       }
       writeStarterPolicy(path);
-      return { data: { path, exists: true, created: true }, changed: true };
+      const created = loadPolicy(path);
+      return {
+        data: { path, exists: true, created: true, fields: fieldsOf(created) },
+        changed: true,
+      };
     }
-    if (action !== 'show') throw new UsageError('Usage: qv policy [init|show]');
-    return { data: { path, exists: loadPolicy(path) !== null, created: false }, changed: false };
+
+    if (action === 'set' || action === 'unset') {
+      /**
+       * Refused without a terminal, and with no flag to override that.
+       *
+       * The policy exists to bound what a non-interactive caller may sign. A
+       * non-interactive caller that can widen its own bound is not bounded —
+       * and an agent emits `--yes` as readily as it emits anything else, so an
+       * escape hatch here would be the whole hatch. Changing the bound is an
+       * act for an attended human, exactly like editing the file.
+       */
+      if (!ctx.interactive) {
+        throw new PreconditionError(
+          'Changing the policy requires a terminal.',
+          'The policy bounds non-interactive signing, so it cannot be changed non-interactively. Edit ' +
+            `${path} directly if you are provisioning a machine.`,
+        );
+      }
+      const policy = loadPolicy(path);
+      if (!policy) {
+        throw new UsageError(`No policy at ${path}.`, 'Create one first:  qv policy init');
+      }
+      const field = assertPolicyField(input.field);
+      const value = action === 'unset' ? '' : (input.value ?? '');
+      if (action === 'set' && input.value === undefined) {
+        throw new UsageError(`Usage: qv policy set ${field} <value>`);
+      }
+      let next: Policy;
+      try {
+        next = withPolicyField(policy, field, value);
+      } catch (err) {
+        throw new UsageError(`Cannot set ${field}: ${(err as Error).message}`);
+      }
+      savePolicy(next, path);
+      return {
+        data: { path, exists: true, created: false, fields: fieldsOf(next), changedField: field },
+        changed: true,
+      };
+    }
+
+    if (action !== 'show') throw new UsageError('Usage: qv policy [init|show|set|unset]');
+    const policy = loadPolicy(path);
+    return {
+      data: { path, exists: policy !== null, created: false, fields: fieldsOf(policy) },
+      changed: false,
+    };
   },
 
   render(result, io) {
-    const { path, exists, created } = result.data;
+    const { path, exists, created, fields, changedField } = result.data;
     if (created) {
       io.out(`created ${path}`);
       io.err('');
@@ -197,18 +269,45 @@ export const policyCommand: CommandSpec<
       io.err('');
       io.err('  Attended signing works without one. Non-interactive signing does not.');
       io.err('  qv policy init');
+      return;
+    }
+    io.out('');
+    for (const { field, value } of fields) {
+      const marker = field === changedField ? io.paint(span('  ←', 'ok')) : '';
+      io.out(`  ${field.padEnd(28)} ${value === '' ? io.paint(span('(no limit)', 'muted')) : value}${marker}`);
     }
   },
-  toJson: (r) => ({ path: r.data.path, exists: r.data.exists, created: r.data.created }),
+  toJson: (r) => ({
+    path: r.data.path,
+    exists: r.data.exists,
+    created: r.data.created,
+    fields: Object.fromEntries(r.data.fields.map((f) => [f.field, f.value])),
+  }),
   outputSchema: {
     type: 'object',
     properties: {
       path: { type: 'string' },
       exists: { type: 'boolean' },
       created: { type: 'boolean' },
+      fields: { type: 'object' },
     },
   },
 };
+
+function fieldsOf(policy: Policy | null): { field: string; value: string }[] {
+  if (!policy) return [];
+  return POLICY_FIELDS.map((field) => ({ field, value: policyValue(policy, field) }));
+}
+
+function assertPolicyField(name: string | undefined): PolicyField {
+  if (!name || !POLICY_FIELDS.includes(name as PolicyField)) {
+    throw new UsageError(
+      `Unknown policy field: ${name ?? '(none)'}`,
+      `Known fields: ${POLICY_FIELDS.join(', ')}`,
+    );
+  }
+  return name as PolicyField;
+}
 
 export const addrCheckCommand: CommandSpec<
   { address: string },

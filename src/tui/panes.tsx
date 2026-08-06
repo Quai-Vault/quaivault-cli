@@ -492,6 +492,74 @@ export function HistoryPane({ state, env }: { state: TuiState; env: TuiEnv }): R
   );
 }
 
+// ------------------------------------------------------------------ policy
+
+/**
+ * The bound on non-interactive signing, and the one place it can be changed
+ * without opening an editor.
+ *
+ * Read-only until `e`. Applying spawns `qv policy set`, so validation and the
+ * write live in the one-shot command — the TUI never touches the file, and
+ * this pane cannot become a second, laxer implementation of the bound.
+ */
+export function PolicyPane({ state }: { state: TuiState }): React.ReactElement {
+  const lines = state.policy;
+  if (!lines) {
+    return (
+      <Box flexDirection="column">
+        <Text color="yellow">No policy file.</Text>
+        <Box height={1} />
+        <Text dimColor>
+          Attended signing works without one. Non-interactive signing — agents, CI, any --yes
+          invocation — does not.
+        </Text>
+        <Text dimColor>Create one with `qv policy init`, then come back.</Text>
+      </Box>
+    );
+  }
+  return (
+    <Box flexDirection="column">
+      <Text dimColor>
+        Bounds non-interactive signing. You, at this terminal, are not restricted by it.
+      </Text>
+      <Box height={1} />
+      {lines.map((line, i) => {
+        const active = i === state.policyField;
+        const editing = active && state.policyEdit !== null;
+        return (
+          <Box key={line.field}>
+            <Box width={30}>
+              <Text color={active ? 'cyan' : undefined} dimColor={!active}>
+                {`${active ? '❯ ' : '  '}${line.field}`}
+              </Text>
+            </Box>
+            {editing ? (
+              <Box>
+                <Text>{safeText(state.policyEdit ?? '', 120)}</Text>
+                <Text color="cyan">▏</Text>
+              </Box>
+            ) : (
+              <Text dimColor={line.value === ''}>
+                {line.value === '' ? '(no limit)' : safeText(line.value, 120)}
+              </Text>
+            )}
+          </Box>
+        );
+      })}
+      <Box height={1} />
+      {state.policyEdit !== null ? (
+        <Text color="green">
+          enter applies this through `qv policy set`, which validates it and rewrites the file
+        </Text>
+      ) : (
+        <Text dimColor>
+          e edits the selected field. Lists are comma-separated; empty means no limit.
+        </Text>
+      )}
+    </Box>
+  );
+}
+
 // ------------------------------------------------------------------- form
 
 export function ProposePane({ state }: { state: TuiState }): React.ReactElement {

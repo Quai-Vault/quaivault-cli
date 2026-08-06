@@ -19,6 +19,7 @@ import {
   DetailPane,
   HistoryPane,
   InboxPane,
+  PolicyPane,
   ProposePane,
   RecoveryPane,
   VaultPane,
@@ -60,6 +61,7 @@ const PANE_LABEL: Record<Pane, string> = {
   activity: 'activity',
   vault: 'vault',
   recovery: 'recovery',
+  policy: 'policy',
   propose: 'propose',
 };
 
@@ -190,6 +192,29 @@ export function App({
         }
       })();
     };
+
+    /**
+     * Commit a policy edit.
+     *
+     * Spawns `qv policy set`, which is where validation and the write live —
+     * the TUI produces argv and never touches the file. The one-shot refuses
+     * without a terminal, so this path cannot be used to widen the bound from
+     * a script; here there is a terminal by construction.
+     */
+    if (
+      state.pane === 'policy' &&
+      state.policyEdit !== null &&
+      mapped === 'return' &&
+      !state.detail
+    ) {
+      const line = state.policy?.[state.policyField];
+      if (line) {
+        const value = state.policyEdit;
+        dispatch({ type: 'policy-edit', value: null });
+        spawn(['policy', 'set', line.field, value], `policy ${line.field}`, '');
+        return;
+      }
+    }
 
     if (state.pane === 'propose' && mapped === 'return' && state.form.field >= 0 && vault) {
       const argv = formArgv(state.form, vault.address);
@@ -357,6 +382,8 @@ function Body({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElem
       return <VaultPane state={state} env={env} />;
     case 'recovery':
       return <RecoveryPane state={state} env={env} />;
+    case 'policy':
+      return <PolicyPane state={state} />;
     case 'propose':
       return <ProposePane state={state} />;
     default: {
@@ -370,6 +397,10 @@ function Body({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElem
 function keyLegend(state: TuiState): string {
   const vaults = state.vaults.length > 1 ? ' · [/] vault' : '';
   if (state.detail) return 'a approve · x execute · q back';
+  if (state.pane === 'policy') {
+    if (state.policyEdit !== null) return 'type to edit · enter apply · ctrl-u clear · esc cancel';
+    return `j/k field · e edit · tab pane${vaults} · r refresh · q quit`;
+  }
   if (state.pane === 'propose') return 'tab field · ←/→ kind · enter build · esc leave';
   if (state.pane === 'recovery' && state.recovery) {
     return `c cancel · a approve · x execute · tab pane${vaults} · r refresh · q quit`;

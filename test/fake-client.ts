@@ -28,6 +28,8 @@ export interface FakeVaultState {
   history: VaultTransaction[];
   affordances: Record<string, Affordance[]>;
   hasPendingRecovery: boolean;
+  /** What the acting identity may do to the pending recovery. */
+  recoveryAffordances: { action: string; allowed: boolean; reason: string }[];
 }
 
 export interface FakeOptions {
@@ -113,6 +115,7 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
       history: [],
       affordances: {},
       hasPendingRecovery: false,
+      recoveryAffordances: [],
       ...over,
     };
   };
@@ -135,6 +138,9 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
       signedMessages: () => Promise.resolve([]),
       recovery: {
         hasPending: () => Promise.resolve(st.hasPendingRecovery),
+        // The real SDK has this; the fake did not, so anything calling it hit
+        // a synchronous TypeError that no `.catch` could see.
+        affordances: () => Promise.resolve(st.recoveryAffordances),
         pending: () =>
           Promise.resolve(
             st.hasPendingRecovery

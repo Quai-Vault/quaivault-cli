@@ -50,6 +50,40 @@ function describe(code: number): { ok: boolean; message: string } {
   }
 }
 
+/**
+ * Hold the primary screen until the user presses a key.
+ *
+ * The child writes its failure to the primary screen — we are suspended, so
+ * the alternate screen is not active — and then Ink re-enters the alternate
+ * screen and forces a redraw the instant the child exits. The message is in
+ * scrollback but the user is looking at the TUI again, so in practice it is
+ * unreadable: all they see is the footer's `describe()` summary, and
+ * "refused: precondition or policy" covers everything from a wrong password
+ * to a policy allowlist to a key that does not match the identity.
+ *
+ * Called only on failure. A success has already told the user what happened,
+ * through the confirmation they just answered.
+ *
+ * Restores stdin exactly as `pauseInput` left it — paused and unref'd — so
+ * Ink's `resumeInput` finds the state it expects.
+ */
+export async function holdUntilAcknowledged(message: string): Promise<void> {
+  const stdin = process.stdin;
+  if (!stdin.isTTY || !process.stdout.isTTY) return;
+  process.stdout.write(message);
+  await new Promise<void>((resolve) => {
+    const finish = (): void => {
+      stdin.off('data', finish);
+      stdin.pause();
+      stdin.unref();
+      resolve();
+    };
+    stdin.ref();
+    stdin.resume();
+    stdin.once('data', finish);
+  });
+}
+
 export async function spawnSigner(argv: string[]): Promise<SpawnOutcome> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [process.argv[1] as string, ...argv], {

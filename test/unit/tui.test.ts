@@ -254,7 +254,8 @@ describe('the propose form', () => {
   });
 
   it('still refreshes and cycles panes from the kind selector', () => {
-    expect(press(form(), 'shift-tab').pane).toBe('recovery');
+    // The point is that the form can be left, not which pane precedes it.
+    expect(press(form(), 'shift-tab').pane).toBe(PANES[PANES.indexOf('propose') - 1]);
   });
 
   it('does not quit while a field is being typed into', () => {
@@ -713,5 +714,77 @@ describe('proposing timelock and delegatecall changes from the form', () => {
       ADDR.vault,
     )!;
     expect(argv).not.toContain('--i-understand-unverified');
+  });
+});
+
+/**
+ * The policy pane.
+ *
+ * Read-only until `e`, and every change leaves as `qv policy set` argv — the
+ * TUI never writes the file, so the pane cannot become a second, laxer
+ * implementation of the bound it displays.
+ */
+describe('the policy pane', () => {
+  const LINES = [
+    { field: 'max_value_per_approval_wei', value: '1000' },
+    { field: 'deny_delegatecall', value: 'true' },
+    { field: 'allow_to', value: '' },
+  ];
+
+  const loaded = (): TuiState =>
+    reduce({ ...initialState(), pane: 'policy' }, { type: 'policy', lines: LINES });
+
+  it('is read-only until e — a stray keystroke cannot change the bound', () => {
+    const s = loaded();
+    for (const key of ['x', 'a', 'c', '1', 'z']) {
+      expect(reduce(s, { type: 'key', key }).policyEdit, key).toBeNull();
+    }
+  });
+
+  it('moves the field cursor with j/k and clamps', () => {
+    let s = loaded();
+    s = press(s, 'j');
+    expect(s.policyField).toBe(1);
+    s = press(s, 'j', 'j', 'j');
+    expect(s.policyField).toBe(LINES.length - 1);
+    s = press(s, 'k', 'k', 'k', 'k');
+    expect(s.policyField).toBe(0);
+  });
+
+  it('seeds the edit buffer with the current value', () => {
+    const s = press(loaded(), 'j', 'e');
+    expect(s.policyEdit).toBe('true');
+  });
+
+  it('edits, clears and cancels without touching the displayed value', () => {
+    let s = press(loaded(), 'e');
+    s = press(s, 'ctrl-u');
+    expect(s.policyEdit).toBe('');
+    s = press(s, '5', '0');
+    expect(s.policyEdit).toBe('50');
+    s = press(s, 'backspace');
+    expect(s.policyEdit).toBe('5');
+    s = press(s, 'escape');
+    expect(s.policyEdit).toBeNull();
+    // The pane still shows what is actually on disk.
+    expect(s.policy?.[0]?.value).toBe('1000');
+  });
+
+  it('accepts a pasted list, because nobody types an allowlist', () => {
+    let s = press(loaded(), 'j', 'j', 'e');
+    s = reduce(s, { type: 'paste', text: `${ADDR.bob},${ADDR.carol}\n` });
+    expect(s.policyEdit).toBe(`${ADDR.bob},${ADDR.carol}`);
+  });
+
+  it('never traps: tab and q keep their meaning while not editing', () => {
+    const s = loaded();
+    expect(press(s, 'tab').pane).not.toBe('policy');
+    expect(press(s, 'q').quit).toBe(true);
+  });
+
+  it('shows nothing to edit when there is no policy file', () => {
+    const s = reduce({ ...initialState(), pane: 'policy' }, { type: 'policy', lines: null });
+    expect(s.policy).toBeNull();
+    expect(press(s, 'e').policyEdit).toBeNull();
   });
 });
