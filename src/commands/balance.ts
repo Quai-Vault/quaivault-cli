@@ -136,13 +136,13 @@ export const messagesCommand: CommandSpec<
   },
 
   render(result, io) {
-    const msgs = result.data.messages as { hash?: string; active?: boolean }[];
+    const msgs = result.data.messages as { msg_hash?: string; is_active?: boolean }[];
     if (!msgs.length) {
       io.out('  No signed messages.');
       return;
     }
     for (const m of msgs) {
-      io.out(`  ${m.active === false ? '[revoked]' : '[signed] '} ${m.hash ?? '(unknown hash)'}`);
+      io.out(`  ${m.is_active === false ? '[revoked]' : '[signed] '} ${m.msg_hash ?? '(unknown hash)'}`);
     }
   },
   toJson: (r) => ({ address: r.data.address, messages: r.data.messages }) as never,

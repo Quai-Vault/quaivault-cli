@@ -124,6 +124,7 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
     const st = stateFor(address);
     return {
       info: () => Promise.resolve(st.info),
+      modules: () => Promise.resolve([]),
       pendingTransactions: () => Promise.resolve(st.pending),
       transactionHistory: () => Promise.resolve(page(st.history)),
       transaction: (hash: string) => {
@@ -136,6 +137,27 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
       affordances: (hash: string) => Promise.resolve(st.affordances[hash] ?? []),
       balances: () => Promise.resolve({ native: st.info.balance, tokens: [] }),
       signedMessages: () => Promise.resolve([]),
+      propose: {
+        transfer: (params: { to: string; amount: bigint; dryRun?: boolean }) =>
+          Promise.resolve(
+            params.dryRun
+              ? {
+                  dryRun: true as const,
+                  to: params.to,
+                  value: params.amount,
+                  data: '0x',
+                  gasEstimate: 21_000n,
+                  description: 'transfer',
+                }
+              : {
+                  txHash: `0x${'aa'.repeat(32)}`,
+                  chainTxHash: `0x${'bb'.repeat(32)}`,
+                  to: params.to,
+                  value: params.amount,
+                  data: '0x',
+                },
+          ),
+      },
       recovery: {
         hasPending: () => Promise.resolve(st.hasPendingRecovery),
         // The real SDK has this; the fake did not, so anything calling it hit
@@ -165,6 +187,43 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
     };
   };
 
+  const chainContract = (address: string) => {
+    const st = stateFor(address);
+    const find = (hash: string): VaultTransaction => {
+      const tx = [...st.pending, ...st.history].find(
+        (candidate) => candidate.hash.toLowerCase() === hash.toLowerCase(),
+      );
+      if (!tx) throw new Error(`no such transaction ${hash}`);
+      return tx;
+    };
+    return {
+      transactions: (hash: string) => {
+        const tx = find(hash);
+        return Promise.resolve({
+          to: tx.to,
+          value: tx.value,
+          data: tx.data,
+          proposer: tx.proposer,
+          timestamp: tx.proposedAt,
+          expiration: tx.expiration,
+          executionDelay: tx.executionDelay,
+          approvedAt: tx.approvedAt,
+          executed: tx.status === 'executed' || tx.status === 'failed',
+          cancelled: tx.status === 'cancelled' || tx.status === 'expired',
+        });
+      },
+      getOwners: () => Promise.resolve(st.info.owners),
+      threshold: () => Promise.resolve(st.info.threshold),
+      expiredTxs: (hash: string) => Promise.resolve(find(hash).status === 'expired'),
+      hasApproved: (hash: string, owner: string) =>
+        Promise.resolve(
+          find(hash).approvals.some(
+            (approval) => approval.active && approval.owner.toLowerCase() === owner.toLowerCase(),
+          ),
+        ),
+    };
+  };
+
   return {
     indexerHealth: () => Promise.resolve(health),
     vault,
@@ -179,6 +238,8 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
     network: mainnet,
     abis: undefined,
     now: () => Math.floor(Date.now() / 1000),
+    config: { contracts: mainnet.contracts },
+    connection: { vault: chainContract },
   } as unknown as QuaiVaultClient;
 }
 

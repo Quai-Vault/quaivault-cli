@@ -20,6 +20,8 @@ export interface Policy {
   denyDelegatecall: boolean;
   /** Which decode provenances may be signed non-interactively. */
   requireAbiSource: AbiSource[];
+  /** Direct guardian/owner recovery actions permitted without a human. */
+  allowRecoveryActions: string[];
 }
 
 export const POLICY_FILENAME = 'policy.toml';
@@ -66,6 +68,7 @@ export function loadPolicy(path = policyPath()): Policy | null {
     denyKinds: strList(o.deny_kinds),
     denyDelegatecall: o.deny_delegatecall !== false,
     requireAbiSource: abiSources.length ? abiSources : ['builtin'],
+    allowRecoveryActions: strList(o.allow_recovery_actions),
   };
 }
 
@@ -96,6 +99,10 @@ deny_delegatecall = true
 # Which decode provenances are trustworthy enough to sign unattended.
 # "builtin" = an ABI the SDK vouches for. Anything else is a guess or a claim.
 require_abi_source = ["builtin"]
+
+# Direct recovery operations permitted unattended. Execution replaces every
+# owner, so keep it absent unless an agent is explicitly entrusted with it.
+allow_recovery_actions = ["cancel", "expire"]
 `;
 
 export function writeStarterPolicy(path = policyPath()): string {
@@ -111,6 +118,7 @@ export const POLICY_FIELDS = [
   'deny_kinds',
   'deny_delegatecall',
   'require_abi_source',
+  'allow_recovery_actions',
 ] as const;
 
 export type PolicyField = (typeof POLICY_FIELDS)[number];
@@ -132,6 +140,8 @@ export function policyValue(policy: Policy, field: PolicyField): string {
       return policy.denyDelegatecall ? 'true' : 'false';
     case 'require_abi_source':
       return policy.requireAbiSource.join(',');
+    case 'allow_recovery_actions':
+      return policy.allowRecoveryActions.join(',');
     default: {
       const never: never = field;
       throw new Error(`unhandled policy field: ${String(never)}`);
@@ -186,6 +196,9 @@ deny_delegatecall = ${policy.denyDelegatecall ? 'true' : 'false'}
 # Which decode provenances are trustworthy enough to sign unattended.
 # "builtin" = an ABI the SDK vouches for. Anything else is a guess or a claim.
 require_abi_source = ${list(policy.requireAbiSource)}
+
+# Direct recovery operations permitted unattended.
+allow_recovery_actions = ${list(policy.allowRecoveryActions)}
 `;
 }
 
@@ -240,6 +253,13 @@ export function withPolicyField(policy: Policy, field: PolicyField, raw: string)
       if (!sources.length) throw new Error('At least one provenance is required; "builtin" is the safe floor.');
       return { ...policy, requireAbiSource: sources as AbiSource[] };
     }
+    case 'allow_recovery_actions': {
+      const actions = csv();
+      const known = ['initiate', 'approve', 'unapprove', 'execute', 'cancel', 'expire'];
+      const bad = actions.filter((action) => !known.includes(action));
+      if (bad.length) throw new Error(`Unknown recovery action: ${bad.join(', ')}`);
+      return { ...policy, allowRecoveryActions: actions };
+    }
     default: {
       const never: never = field;
       throw new Error(`unhandled policy field: ${String(never)}`);
@@ -254,21 +274,32 @@ export interface PolicyCheckInput {
   isDelegatecall: boolean;
   abiSource: AbiSource;
   approvalsLastHour: number;
+  /** False for execute/cancel/etc.; the rate limit is specifically approvals. */
+  countTowardApprovalLimit?: boolean;
+  /** Actual effects, including decoded token recipients and batch subcalls. */
+  effects?: { to: string; value: bigint; kind: string }[];
 }
 
 /** Returns the violated rules. Empty means allowed. */
 export function checkPolicy(policy: Policy, input: PolicyCheckInput): PolicyViolation[] {
   const out: PolicyViolation[] = [];
-  if (policy.maxValuePerApprovalWei !== undefined && input.value > policy.maxValuePerApprovalWei) {
+  const effects = input.effects?.length
+    ? input.effects
+    : [{ to: input.to, value: input.value, kind: input.kind }];
+  // Native value can accompany an arbitrary contract call, not just a plain
+  // transfer. Sum every effect or `propose call --value` bypasses the bound.
+  const nativeValue = effects.reduce((total, effect) => total + effect.value, 0n);
+  if (policy.maxValuePerApprovalWei !== undefined && nativeValue > policy.maxValuePerApprovalWei) {
     out.push(
       new PolicyViolation(
         'max_value_per_approval_wei',
-        `Value ${input.value} wei exceeds the policy limit of ${policy.maxValuePerApprovalWei} wei.`,
+        `Native value ${nativeValue} wei exceeds the policy limit of ${policy.maxValuePerApprovalWei} wei.`,
       ),
     );
   }
   if (
     policy.maxApprovalsPerHour !== undefined &&
+    input.countTowardApprovalLimit !== false &&
     input.approvalsLastHour >= policy.maxApprovalsPerHour
   ) {
     out.push(
@@ -278,13 +309,19 @@ export function checkPolicy(policy: Policy, input: PolicyCheckInput): PolicyViol
       ),
     );
   }
-  if (policy.allowTo.length > 0 && !policy.allowTo.includes(input.to.toLowerCase())) {
-    out.push(
-      new PolicyViolation('allow_to', `Recipient ${input.to} is not in the policy allowlist.`),
-    );
+  if (policy.allowTo.length > 0) {
+    for (const effect of effects) {
+      if (!policy.allowTo.includes(effect.to.toLowerCase())) {
+        out.push(
+          new PolicyViolation('allow_to', `Recipient ${effect.to} is not in the policy allowlist.`),
+        );
+      }
+    }
   }
-  if (policy.denyKinds.includes(input.kind)) {
-    out.push(new PolicyViolation('deny_kinds', `Transaction kind "${input.kind}" is denied.`));
+  for (const kind of new Set([input.kind, ...effects.map((effect) => effect.kind)])) {
+    if (policy.denyKinds.includes(kind)) {
+      out.push(new PolicyViolation('deny_kinds', `Transaction kind "${kind}" is denied.`));
+    }
   }
   if (policy.denyDelegatecall && input.isDelegatecall) {
     out.push(

@@ -311,4 +311,32 @@ describe('SDK surface coverage', () => {
     // does not need would be gaming it; this only catches a real regression.
     expect(pct, `SDK surface coverage is ${pct}%`).toBeGreaterThanOrEqual(50);
   });
+
+  it('keeps the web-parity capability paths wired to concrete SDK calls', () => {
+    const requiredCalls = [
+      '.propose.erc20Transfer(',
+      '.propose.erc721Transfer(',
+      '.propose.erc1155Transfer(',
+      '.propose.batch(',
+      '.propose.call(',
+      '.propose.setupRecovery(',
+      '.propose.addOwner(',
+      '.propose.removeOwner(',
+      '.propose.changeThreshold(',
+      '.propose.setMinExecutionDelay(',
+      '.propose.cancelByConsensus(',
+      '.propose.enableModule(',
+      '.propose.disableModule(',
+      '.propose.addDelegatecallTarget(',
+      '.propose.removeDelegatecallTarget(',
+      '.propose.signMessage(',
+      '.propose.unsignMessage(',
+      '.deposits(',
+      '.tokenTransfers(',
+      '.revokeApproval(',
+      '.expire(',
+      '.connection.vault(',
+    ];
+    expect(requiredCalls.filter((marker) => !corpus.includes(marker))).toEqual([]);
+  });
 });

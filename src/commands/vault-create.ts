@@ -99,7 +99,7 @@ function collectParams(ctx: AppContext, input: CreateInput): CreateVaultParams {
   return { owners, threshold, minExecutionDelay };
 }
 
-export const vaultCreateCommand: CommandSpec<CreateInput, { address: string; salt: string }, CreatePlan> = {
+export const vaultCreateCommand: CommandSpec<CreateInput, { address: string; salt: string; chainTxHash: string }, CreatePlan> = {
   path: ['vault', 'create'],
   describe: 'Deploy a new vault',
   options: [
@@ -140,6 +140,14 @@ export const vaultCreateCommand: CommandSpec<CreateInput, { address: string; sal
     io.out(`  Timelock   ${formatDuration(p.minExecutionDelay ?? 0)}`);
     if (planned.disclosure.salt) io.out(`  Salt       ${planned.disclosure.salt} (pre-mined)`);
   },
+  planToJson: (planned) => ({
+    owners: planned.disclosure.params.owners,
+    threshold: planned.disclosure.params.threshold,
+    minExecutionDelay: planned.disclosure.params.minExecutionDelay ?? 0,
+    initialModules: planned.disclosure.params.initialModules ?? [],
+    initialDelegatecallTargets: planned.disclosure.params.initialDelegatecallTargets ?? [],
+    salt: planned.disclosure.salt ?? null,
+  }),
 
   async commit(ctx, planned) {
     await ctx.requireSigner();
@@ -152,9 +160,10 @@ export const vaultCreateCommand: CommandSpec<CreateInput, { address: string; sal
       },
     );
     return {
-      data: { address: result.address, salt: result.salt },
+      data: { address: result.address, salt: result.salt, chainTxHash: result.chainTxHash },
       changed: true,
-      steps: [{ name: 'deploy', status: 'ok' }],
+      retryable: false,
+      steps: [{ name: 'deploy', status: 'ok', chainTxHash: result.chainTxHash }],
       next: [`qv vault show ${result.address}`],
       warnings: result.predictionMatched === false
         ? ['The deployed address did not match the prediction. Verify before funding it.']
@@ -169,10 +178,15 @@ export const vaultCreateCommand: CommandSpec<CreateInput, { address: string; sal
     io.err('');
     io.err(`  qv alias add <name> ${result.data.address}`);
   },
-  toJson: (r) => ({ address: r.data.address, salt: r.data.salt }),
+  toJson: (r) => ({ address: r.data.address, salt: r.data.salt, chainTxHash: r.data.chainTxHash }),
   outputSchema: {
     type: 'object',
-    properties: { address: { type: 'string' }, salt: { type: 'string' } },
+    required: ['address', 'salt', 'chainTxHash'],
+    properties: {
+      address: { type: 'string' },
+      salt: { type: 'string' },
+      chainTxHash: { type: 'string' },
+    },
   },
 };
 

@@ -5,6 +5,7 @@ import { guardAgainstInspector } from '../cli/tty.js';
 import { createIo } from '../render/io.js';
 import { normalizeError, renderError } from '../render/errors.js';
 import { renderWelcome } from '../render/welcome.js';
+import { envelope, SCHEMA_VERSION } from '../util/json.js';
 
 async function main(): Promise<ExitCodeValue> {
   guardAgainstInspector();
@@ -27,7 +28,18 @@ async function main(): Promise<ExitCodeValue> {
       // help/version print themselves and exit 0
       if (err.code === 'commander.helpDisplayed' || err.code === 'commander.help') return ExitCode.Ok;
       if (err.code === 'commander.version') return ExitCode.Ok;
-      process.stderr.write(`${err.message}\n`);
+      if (argv.includes('--json')) {
+        process.stdout.write(
+          `${envelope({
+            schema: SCHEMA_VERSION,
+            ok: false,
+            command: 'parse',
+            changed: false,
+            retryable: false,
+            error: { code: 'VALIDATION', message: err.message },
+          })}\n`,
+        );
+      }
       return ExitCode.Usage;
     }
     throw err;
@@ -42,15 +54,30 @@ process.on('SIGINT', () => {
   process.exit(ExitCode.Interrupted);
 });
 
+async function flushOutput(): Promise<void> {
+  await Promise.all([
+    new Promise<void>((resolve) => process.stdout.end(() => resolve())),
+    new Promise<void>((resolve) => process.stderr.end(() => resolve())),
+  ]);
+}
+
 main()
-  .then((code) => {
-    if (!interrupted) process.exitCode = code;
+  .then(async (code) => {
+    if (interrupted) return;
+    process.exitCode = code;
+    // SDK clients own provider/transport handles that are intentionally not
+    // exposed for disposal. A completed one-shot command must still terminate;
+    // flush both streams first so explicit exit cannot truncate piped JSON.
+    await flushOutput();
+    process.exit(code);
   })
-  .catch((err: unknown) => {
+  .catch(async (err: unknown) => {
     // Last-resort funnel. Never prints a raw error object: a quais provider
     // error carries the full JSON-RPC request body on `.info.payload`, and
     // Node's default printing walks the cause chain.
     const io = createIo({});
     renderError(normalizeError(err), io, process.env.QUAIVAULT_DEBUG === '1', err);
     process.exitCode = ExitCode.Failure;
+    await flushOutput();
+    process.exit(ExitCode.Failure);
   });

@@ -1,4 +1,4 @@
-import type { Affordance, Subscription, VaultTransaction, WatchEvent } from '@quaivault/sdk';
+import { mapPooled, type Subscription, type VaultTransaction, type WatchEvent } from '@quaivault/sdk';
 import type { CommandSpec } from '../cli/spec.js';
 import { ExitCode } from '../cli/exit.js';
 import { UsageError, type AppContext } from '../context/context.js';
@@ -53,10 +53,10 @@ function labelFor(ctx: AppContext, address: string): string {
 /** Vaults the identity touches. */
 async function loadVaults(ctx: AppContext, identity: string): Promise<string[]> {
   const [owned, guardian] = await Promise.all([
-    ctx.qv.vaults.forOwner(identity).catch(() => [] as string[]),
-    ctx.qv.vaults.forGuardian(identity).catch(() => [] as string[]),
+    ctx.qv.vaults.forOwner(identity),
+    ctx.qv.vaults.forGuardian(identity),
   ]);
-  return [...new Set([...owned, ...guardian])].slice(0, 25);
+  return [...new Set([...owned, ...guardian])];
 }
 
 async function rowsFor(
@@ -64,10 +64,11 @@ async function rowsFor(
   address: string,
   identity: string,
   txs: VaultTransaction[],
+  chainHead?: number,
 ): Promise<TuiRow[]> {
   const vault = ctx.qv.vault(address);
   const affs = await Promise.all(
-    txs.map((tx) => vault.affordances(tx.hash, identity).catch(() => [] as Affordance[])),
+    txs.map((tx) => vault.affordances(tx.hash, identity)),
   );
   return txs.map((tx, i) => ({
     vault: address,
@@ -76,6 +77,7 @@ async function rowsFor(
     affordances: affs[i] ?? [],
     // Computed here rather than in `tui/`, which may not import SDK values.
     batch: batchOf(tx, ctx),
+    ...(chainHead !== undefined ? { chainHead } : {}),
   }));
 }
 
@@ -120,30 +122,31 @@ async function loadVaultScoped(
   identity: string,
 ): Promise<void> {
   const vault = ctx.qv.vault(address);
-  const [info, balances, history, pendingRecovery] = await Promise.all([
-    vault.info().catch(() => null),
-    vault.balances({ verify: false }).catch(() => null),
-    vault
-      .transactionHistory({ limit: 50 })
-      .then((p) => p.data)
-      .catch((): VaultTransaction[] => []),
-    vault.recovery.pending().catch(() => [] as PendingRecoveryRow[]),
+  const [info, modules, balances, historyPage, pendingRecovery, health] = await Promise.all([
+    vault.info(),
+    vault.modules(),
+    vault.balances({ verify: false }),
+    vault.transactionHistory({ limit: 50 }),
+    vault.recovery.pending(),
+    ctx.qv.indexerHealth(),
   ]);
 
   dispatch({
     type: 'vault-detail',
-    detail: info
-      ? {
-          owners: info.owners,
-          threshold: info.threshold,
-          minExecutionDelay: info.minExecutionDelay,
-          modules: [],
-          balanceWei: balances?.native ?? info.balance,
-        }
-      : null,
+    detail: {
+      owners: info.owners,
+      threshold: info.threshold,
+      minExecutionDelay: info.minExecutionDelay,
+      modules,
+      balanceWei: balances.native,
+      tokens: balances.tokens,
+    },
   });
 
   const first = (pendingRecovery as PendingRecoveryRow[])[0];
+  const recoveryAffordances = first
+    ? await vault.recovery.affordances(first.hash, identity)
+    : [];
   const recovery: RecoveryDetail | null = first
     ? {
         hash: first.hash,
@@ -153,11 +156,16 @@ async function loadVaultScoped(
         required: first.requiredThreshold,
         ...(first.executionTime ? { executableAt: first.executionTime } : {}),
         ...(first.expiration ? { expiration: first.expiration } : {}),
+        affordances: recoveryAffordances,
+        additional: Math.max(0, pendingRecovery.length - 1),
       }
     : null;
   dispatch({ type: 'recovery', detail: recovery });
 
-  dispatch({ type: 'history', rows: await rowsFor(ctx, address, identity, history) });
+  dispatch({
+    type: 'history',
+    rows: await rowsFor(ctx, address, identity, historyPage.data, health.chainHead),
+  });
 }
 
 /**
@@ -184,7 +192,7 @@ async function refresh(
     ctx.qv.indexerHealth().catch(() => null),
   ]);
   vaultsOut(vaults);
-  const degraded = health?.available === false;
+  const degraded = health?.available !== true;
 
   // A local file read, so it rides along with every refresh — including the
   // one that runs after `qv policy set` returns, which is what makes an edit
@@ -196,12 +204,11 @@ async function refresh(
   // reshuffles between refreshes — and on a surface that auto-refreshes on
   // chain events, the row under the cursor can change identity between
   // looking at it and pressing `a`. Observed against 25 live Orchard vaults.
-  const perVault = await Promise.all(
-    vaults.map(async (address, i) => {
+  const perVault = await mapPooled(vaults, 6, async (address, i) => {
       const vault = ctx.qv.vault(address);
       const [pending, hasRecovery] = await Promise.all([
-        vault.pendingTransactions({ limit: 50 }).catch((): VaultTransaction[] => []),
-        vault.recovery.hasPending().catch(() => false),
+        vault.pendingTransactions({ limit: 50 }),
+        vault.recovery.hasPending(),
       ]);
       return {
         i,
@@ -211,10 +218,9 @@ async function refresh(
           pending: pending.length,
           hasRecovery,
         } satisfies VaultSummary,
-        rows: await rowsFor(ctx, address, identity, pending),
+        rows: await rowsFor(ctx, address, identity, pending, health?.chainHead),
       };
-    }),
-  );
+    });
   perVault.sort((a, b) => a.i - b.i);
 
   dispatch({ type: 'vaults', vaults: perVault.map((v) => v.summary) });
@@ -243,21 +249,27 @@ function subscribe(
   const plan = planChannels(vaults);
   const feed = new ChangeFeed(ctx.store);
   const subs: Subscription[] = [];
-  const off = feed.subscribe((_keys, event) => {
-    // Topic and type only. `WatchEvent.row` is the raw Postgres row and is
-    // attacker-influenceable (§8 R10); it never enters the UI.
-    dispatch({
-      type: 'activity',
-      entry: { at: ctx.now(), topic: event.topic, type: event.type, vault: '' },
-    });
-    onChange();
-  });
   for (const address of plan.subscribed) {
     try {
       subs.push(
-        ctx.qv.vault(address).watch((event: WatchEvent) => feed.push(address, event), {
-          topics: ['transactions', 'confirmations', 'owners', 'recoveries'],
-        }),
+        ctx.qv.vault(address).watch(
+          (event: WatchEvent) => {
+            feed.push(address, event);
+            // Activity and refresh are event-driven, not conditional on a
+            // matching cache entry existing.
+            dispatch({
+              type: 'activity',
+              entry: {
+                at: ctx.now(),
+                topic: event.topic,
+                type: event.type,
+                vault: labelFor(ctx, address),
+              },
+            });
+            onChange();
+          },
+          { topics: ['transactions', 'confirmations', 'owners', 'recoveries'] },
+        ),
       );
     } catch {
       // A channel that will not open is a degraded refresh, not a dead UI.
@@ -266,7 +278,6 @@ function subscribe(
   return {
     plan,
     close: async () => {
-      off();
       // Awaited rather than fired and forgotten. `unsubscribe` returns a
       // promise that closes a Realtime channel; dropping it left channels
       // half-torn-down at exit.
@@ -312,20 +323,38 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
     let redraw: (() => void) | undefined;
     /** The vault the cursor is on. Survives refreshes; drives the scoped panes. */
     let currentVault: string | undefined;
+    let watchedKey = '';
+    let refreshing = false;
+    let refreshAgain = false;
 
     const doRefresh = async (dispatch: Dispatch): Promise<void> => {
+      if (refreshing) {
+        refreshAgain = true;
+        return;
+      }
+      refreshing = true;
       try {
-        currentVault = await refresh(
-          ctx,
-          dispatch,
-          (found) => {
-            vaults = found;
-          },
-          currentVault,
-        );
-        watching ??= subscribe(ctx, vaults, dispatch, () => redraw?.());
+        do {
+          refreshAgain = false;
+          currentVault = await refresh(
+            ctx,
+            dispatch,
+            (found) => {
+              vaults = found;
+            },
+            currentVault,
+          );
+          const nextKey = vaults.map((vault) => vault.toLowerCase()).join(',');
+          if (nextKey !== watchedKey) {
+            await watching?.close();
+            watching = subscribe(ctx, vaults, dispatch, () => redraw?.());
+            watchedKey = nextKey;
+          }
+        } while (refreshAgain);
       } catch (err) {
         dispatch({ type: 'error', message: err instanceof Error ? err.message : 'load failed' });
+      } finally {
+        refreshing = false;
       }
     };
 
@@ -375,10 +404,13 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
       // and to restore the primary screen on unmount, including on a signal.
       { exitOnCtrlC: true, alternateScreen: true },
     );
+    // Heal missed socket events and tail vaults beyond the realtime-channel budget.
+    const pollTimer = setInterval(() => redraw?.(), 15_000);
 
     try {
       await app.waitUntilExit();
     } finally {
+      clearInterval(pollTimer);
       // Awaited, not fired and forgotten: each one closes a Realtime channel.
       await watching?.close();
     }

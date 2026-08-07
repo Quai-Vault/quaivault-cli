@@ -126,13 +126,23 @@ export function buildProgram(exitRef: { code: ExitCodeValue }): Command {
     .showHelpAfterError(false)
     .exitOverride();
 
+  // Commander otherwise prints before throwing its override error. Suppress
+  // that channel for JSON callers, and avoid printing it a second time in the
+  // top-level catch for humans.
+  program.configureOutput({
+    writeErr: (text) => {
+      if (!process.argv.slice(2).includes('--json')) process.stderr.write(text);
+    },
+  });
+
   for (const opt of globalOptions()) program.addOption(opt);
 
   program
     .command('--schema', { hidden: true })
     .description('emit the machine-readable command and output schema')
-    .action(() => {
-      process.stdout.write(`${JSON.stringify(buildSchema(CLI_VERSION), null, 2)}\n`);
+    .option('--schema-version <n>', 'schema contract version', String(1))
+    .action((options: { schemaVersion?: string }) => {
+      process.stdout.write(`${JSON.stringify(buildSchema(CLI_VERSION, Number(options.schemaVersion ?? 1)), null, 2)}\n`);
     });
 
   // Not a CommandSpec: it emits a shell script to stdout and touches no

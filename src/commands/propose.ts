@@ -1,5 +1,8 @@
-import { inspectAddress, minimumExpiration, MAX_EXECUTION_DELAY } from '@quaivault/sdk';
-import type { ProposeResult, DryRunResult, Vault } from '@quaivault/sdk';
+import { readFileSync } from 'node:fs';
+import { decodeCall, inspectAddress, minimumExpiration, MAX_EXECUTION_DELAY } from '@quaivault/sdk';
+import type { BatchCall, ProposeResult, DryRunResult, Vault } from '@quaivault/sdk';
+import { Interface, keccak256, type InterfaceAbi } from 'quais';
+import { createHash } from 'node:crypto';
 import type { CommandSpec, WritePlan } from '../cli/spec.js';
 import { PreconditionError, UsageError, type AppContext } from '../context/context.js';
 import { span } from '../format/tone.js';
@@ -11,6 +14,9 @@ import {
   parseUnits,
 } from '../format/index.js';
 import type { Io } from '../render/io.js';
+import { findOperation, recordOperation, type OperationRecord } from '../context/operation-journal.js';
+import { checkPolicy } from '../context/policy.js';
+import { analyzeBatch, isUnverified, type BatchAnalysis } from '../abi/batch.js';
 
 /**
  * Every write except approve/execute/cancel/expire is a *proposal*: it asks
@@ -23,6 +29,7 @@ interface ProposeCommon {
   vault?: string;
   expiration?: string;
   executionDelay?: string;
+  idempotencyKey?: string;
 }
 
 interface ProposePlan {
@@ -31,12 +38,22 @@ interface ProposePlan {
   detail: string[];
   build: (vault: Vault, dryRun: boolean) => Promise<ProposeResult | DryRunResult>;
   unverified: boolean;
+  requestFingerprint: string;
+  preview: DryRunResult;
+  abiSource: 'builtin' | 'heuristic' | 'supplied' | 'none';
+  batch: BatchAnalysis | null;
+  reconciled?: OperationRecord;
+  idempotencyKey?: string;
 }
 
 const COMMON_OPTIONS = [
   {
     flags: '--expiration <when>',
     description: 'expiry as a duration (7d, 24h) or unix seconds; default none',
+  },
+  {
+    flags: '--idempotency-key <key>',
+    description: 'deduplicate a proposal retry using the local durable operation journal',
   },
   {
     flags: '--execution-delay <duration>',
@@ -213,6 +230,62 @@ function makeProposeCommand<I extends ProposeCommon>(cfg: {
       const vault = ctx.qv.vault(address);
       const timing = await resolveTiming(ctx, vault, input);
       const built = await cfg.build(ctx, vault, input, timing);
+      const previewResult = await built.call(true);
+      if (!isDryRun(previewResult)) {
+        throw new PreconditionError('The SDK broadcast during a proposal dry run; refusing to continue.');
+      }
+      const preview = previewResult;
+      const decoded = decodeCall({
+        vault: address,
+        to: preview.to,
+        value: preview.value,
+        data: preview.data,
+        ...(ctx.qv.config.contracts.socialRecovery
+          ? { socialRecovery: ctx.qv.config.contracts.socialRecovery }
+          : {}),
+        ...(ctx.qv.config.contracts.multiSendCallOnly
+          ? { multiSendCallOnly: ctx.qv.config.contracts.multiSendCallOnly }
+          : {}),
+        ...(ctx.qv.abis ? { abis: ctx.qv.abis } : {}),
+      });
+      const batch = analyzeBatch({
+        vault: address,
+        to: preview.to,
+        data: preview.data,
+        contracts: ctx.qv.config.contracts,
+        ...(ctx.qv.abis ? { abis: ctx.qv.abis } : {}),
+      });
+      const unverified = isUnverified(decoded.abiSource, batch);
+      if (ctx.policy && (ctx.flags.yes || !ctx.interactive)) {
+        const effects = proposalEffects(preview, decoded.kind, decoded.decoded, batch);
+        const violations = checkPolicy(ctx.policy, {
+          value: preview.value,
+          to: preview.to,
+          kind: decoded.kind,
+          isDelegatecall: batch?.hasDelegatecall ?? false,
+          abiSource: batch ? weakestProvenance(decoded.abiSource, batch.abiSource) : decoded.abiSource,
+          approvalsLastHour: 0,
+          countTowardApprovalLimit: false,
+          effects,
+        });
+        if (violations.length) {
+          throw new PreconditionError(
+            `Refused by policy: ${violations.map((violation) => violation.rule).join(', ')}`,
+            violations.map((violation) => violation.message).join('\n  '),
+          );
+        }
+      }
+      const requestFingerprint = createHash('sha256')
+        .update(JSON.stringify({ command: cfg.path.join(' '), input }))
+        .digest('hex');
+      const reconciled = input.idempotencyKey
+        ? findOperation(ctx.profileName, input.idempotencyKey)
+        : undefined;
+      if (reconciled && reconciled.fingerprint !== requestFingerprint) {
+        throw new UsageError(
+          `Idempotency key ${JSON.stringify(input.idempotencyKey)} was already used for different inputs.`,
+        );
+      }
       const detail = [...built.detail];
       if (timing.effectiveDelay > 0) {
         detail.push(`Timelock: ${formatDuration(timing.effectiveDelay)} once quorum is reached`);
@@ -221,15 +294,69 @@ function makeProposeCommand<I extends ProposeCommon>(cfg: {
         detail.push(`Expires: ${new Date(timing.expiration * 1000).toISOString()}`);
       }
       return {
-        disclosure: { address, action: cfg.action, detail, build: (_v, dry) => built.call(dry), unverified: false },
+        disclosure: {
+          address,
+          action: cfg.action,
+          detail,
+          build: (_v, dry) => built.call(dry),
+          unverified,
+          preview,
+          abiSource: decoded.abiSource,
+          batch,
+          requestFingerprint,
+          ...(reconciled ? { reconciled } : {}),
+          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+        },
         summary: cfg.action,
+        unverified,
       };
     },
 
     renderPlan: renderProposePlan,
 
     async commit(ctx, planned) {
+      if (planned.disclosure.reconciled) {
+        const prior = planned.disclosure.reconciled;
+        return {
+          data: {
+            address: prior.vault,
+            txHash: prior.transactionHash,
+            chainTxHash: prior.chainTxHash,
+            action: cfg.action,
+          },
+          changed: false,
+          retryable: false,
+          steps: [{ name: 'propose', status: 'skipped', chainTxHash: prior.chainTxHash }],
+          warnings: ['Reconciled from the local operation journal; no transaction was broadcast.'],
+        };
+      }
       await ctx.requireSigner();
+      // The signing lock is held now. Reconcile again inside it so two agents
+      // starting the same keyed operation concurrently cannot both observe an
+      // empty journal and broadcast duplicate proposals.
+      const idempotencyKey = planned.disclosure.idempotencyKey;
+      if (idempotencyKey) {
+        const prior = findOperation(ctx.profileName, idempotencyKey);
+        if (prior) {
+          if (prior.fingerprint !== planned.disclosure.requestFingerprint) {
+            throw new UsageError(
+              `Idempotency key ${JSON.stringify(idempotencyKey)} was already used for different inputs.`,
+            );
+          }
+          return {
+            data: {
+              address: prior.vault,
+              txHash: prior.transactionHash,
+              chainTxHash: prior.chainTxHash,
+              action: cfg.action,
+            },
+            changed: false,
+            retryable: false,
+            steps: [{ name: 'propose', status: 'skipped', chainTxHash: prior.chainTxHash }],
+            warnings: ['Reconciled from the local operation journal; no transaction was broadcast.'],
+          };
+        }
+      }
       const vault = ctx.qv.vault(planned.disclosure.address);
       const result = await planned.disclosure.build(vault, false);
       if (isDryRun(result)) {
@@ -239,6 +366,30 @@ function makeProposeCommand<I extends ProposeCommon>(cfg: {
         };
       }
       const proposed = result;
+      // Persist before returning so a killed caller can safely repeat the same
+      // intent. Do this before waiting for the indexer to minimize the
+      // broadcast-to-journal window. A local disk failure must not hide a
+      // successful broadcast and invite a duplicate retry, so report it as a
+      // warning alongside the hashes rather than turning success into error.
+      let journalWarning: string | undefined;
+      if (idempotencyKey) {
+        try {
+          recordOperation({
+            at: ctx.now(),
+            profile: ctx.profileName,
+            key: idempotencyKey,
+            fingerprint: planned.disclosure.requestFingerprint,
+            command: cfg.path.join(' '),
+            vault: planned.disclosure.address,
+            transactionHash: proposed.txHash,
+            chainTxHash: proposed.chainTxHash,
+          });
+        } catch {
+          journalWarning =
+            'The proposal landed, but its local idempotency record could not be saved. ' +
+            'Keep the returned hashes and do not retry this proposal blindly.';
+        }
+      }
       // Same rule as the lifecycle writes (§4.1): the proposal landed, so
       // exit 0, but say that the indexer is behind rather than leaving the
       // next read looking mysteriously empty.
@@ -259,20 +410,91 @@ function makeProposeCommand<I extends ProposeCommon>(cfg: {
         changed: true,
         retryable: false,
         steps: [{ name: 'propose', status: 'ok', chainTxHash: proposed.chainTxHash }],
-        next: [`qv tx show ${planned.disclosure.address} ${proposed.txHash.slice(0, 10)}`],
-        warnings: reached
-          ? undefined
-          : [
-              'The proposal landed on chain but the indexer has not caught up yet. ' +
-                '`qv tx show` may lag by a few seconds; do not re-run this command.',
-            ],
+        next: [`qv tx show ${planned.disclosure.address} ${proposed.txHash}`],
+        warnings: [
+          ...(journalWarning ? [journalWarning] : []),
+          ...(reached
+            ? []
+            : [
+                'The proposal landed on chain but the indexer has not caught up yet. ' +
+                  '`qv tx show` may lag by a few seconds; do not re-run this command.',
+              ]),
+        ],
       };
     },
 
     render: proposeResultRender,
+    planToJson: (planned) => ({
+      action: planned.disclosure.action,
+      vault: planned.disclosure.address,
+      detail: planned.disclosure.detail,
+      unverified: planned.disclosure.unverified,
+      to: planned.disclosure.preview.to,
+      value: planned.disclosure.preview.value.toString(10),
+      data: planned.disclosure.preview.data,
+      dataHash: keccak256(planned.disclosure.preview.data),
+      abiSource: planned.disclosure.abiSource,
+      batch: planned.disclosure.batch
+        ? {
+            unreadable: planned.disclosure.batch.error ?? null,
+            hasDelegatecall: planned.disclosure.batch.hasDelegatecall,
+            abiSource: planned.disclosure.batch.abiSource,
+            calls: planned.disclosure.batch.calls.map((call) => ({
+              operation: call.operation,
+              to: call.to,
+              value: call.value.toString(10),
+              data: call.data,
+              abiSource: call.abiSource,
+            })),
+          }
+        : null,
+    }),
     toJson: (r) => proposeJson(r) as never,
     outputSchema: proposeSchema,
   };
+}
+
+function weakestProvenance(
+  outer: ProposePlan['abiSource'],
+  inner: ProposePlan['abiSource'],
+): ProposePlan['abiSource'] {
+  const order: ProposePlan['abiSource'][] = ['builtin', 'supplied', 'heuristic', 'none'];
+  return order.indexOf(inner) > order.indexOf(outer) ? inner : outer;
+}
+
+function proposalEffects(
+  preview: DryRunResult,
+  kind: string,
+  decoded: ReturnType<typeof decodeCall>['decoded'],
+  batch: BatchAnalysis | null,
+): { to: string; value: bigint; kind: string }[] {
+  const effect = (
+    fallbackTo: string,
+    value: bigint,
+    effectKind: string,
+    callDecoded?: ReturnType<typeof decodeCall>['decoded'],
+  ) => ({
+    to: typeof callDecoded?.args.to === 'string' ? callDecoded.args.to : fallbackTo,
+    value,
+    kind: effectKind,
+  });
+  if (!batch) return [effect(preview.to, preview.value, kind, decoded)];
+  return batch.calls.map((call) =>
+    effect(
+      call.to,
+      call.value,
+      call.decoded?.target === 'erc20'
+        ? 'erc20_transfer'
+        : call.decoded?.target === 'erc721'
+          ? 'erc721_transfer'
+          : call.decoded?.target === 'erc1155'
+            ? 'erc1155_transfer'
+            : call.value > 0n && call.data === '0x'
+              ? 'transfer'
+              : 'external_call',
+      call.decoded,
+    ),
+  );
 }
 
 // ------------------------------------------------------------------ transfers
@@ -349,8 +571,82 @@ export const proposeNftCommand = makeProposeCommand<
   },
 });
 
+export const proposeErc1155Command = makeProposeCommand<
+  ProposeCommon & { token: string; to: string; tokenId: string; amount: string; data?: string }
+>({
+  path: ['propose', 'erc1155'],
+  describe: 'Propose an ERC-1155 transfer',
+  options: [
+    { flags: '--token <address>', description: 'token contract' },
+    { flags: '--to <address>', description: 'recipient' },
+    { flags: '--token-id <id>', description: 'token id' },
+    { flags: '--amount <raw>', description: 'quantity in raw units' },
+    { flags: '--data <hex>', description: 'optional receiver data', defaultValue: '0x' },
+  ],
+  action: 'transfer ERC-1155 tokens',
+  build: (_ctx, vault, input, timing) => {
+    const token = assertRecipient(requireFlag(input.token, '--token'), 'token');
+    const to = assertRecipient(requireFlag(input.to, '--to'));
+    const tokenId = BigInt(requireFlag(input.tokenId, '--token-id'));
+    const amount = BigInt(requireFlag(input.amount, '--amount'));
+    const data = (input.data ?? '0x') as `0x${string}`;
+    if (!/^0x([0-9a-fA-F]{2})*$/.test(data)) throw new UsageError('--data must be even-length hex.');
+    return Promise.resolve({
+      detail: [`Token:  ${token}`, `To:     ${to}`, `Id:     #${tokenId}`, `Amount: ${amount}`],
+      call: (dryRun: boolean) =>
+        vault.propose.erc1155Transfer({ token, to, id: tokenId, amount, data, ...timing, dryRun }),
+    });
+  },
+});
+
+export const proposeBatchCommand = makeProposeCommand<ProposeCommon & { request: string }>({
+  path: ['propose', 'batch'],
+  describe: 'Propose an atomic MultiSend batch from a JSON request',
+  options: [{ flags: '--request <path|->', description: 'JSON array of {to,value?,data?}; - reads stdin' }],
+  action: 'execute an atomic batch',
+  build: (_ctx, vault, input, timing) => {
+    const source = requireFlag(input.request, '--request');
+    const parsed = JSON.parse(readFileSync(source === '-' ? 0 : source, 'utf8')) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      throw new UsageError('Batch request must be a non-empty JSON array.');
+    }
+    const calls: BatchCall[] = parsed.map((raw, index) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new UsageError(`Batch call ${index} must be an object.`);
+      }
+      const call = raw as Record<string, unknown>;
+      if (typeof call.to !== 'string') throw new UsageError(`Batch call ${index} needs "to".`);
+      const to = assertRecipient(call.to, `batch call ${index} target`);
+      if (
+        call.value !== undefined &&
+        typeof call.value !== 'string' &&
+        typeof call.value !== 'number' &&
+        typeof call.value !== 'bigint'
+      ) {
+        throw new UsageError(`Batch call ${index} value must be an integer string.`);
+      }
+      if (call.data !== undefined && typeof call.data !== 'string') {
+        throw new UsageError(`Batch call ${index} data must be a hex string.`);
+      }
+      const value = call.value === undefined ? 0n : BigInt(call.value);
+      const data = (call.data ?? '0x') as `0x${string}`;
+      if (!/^0x([0-9a-fA-F]{2})*$/.test(data)) {
+        throw new UsageError(`Batch call ${index} data must be even-length hex.`);
+      }
+      return { to, value, data };
+    });
+    return Promise.resolve({
+      detail: calls.flatMap((call, index) => [
+        `[${index + 1}/${calls.length}] ${call.to}`,
+        `  value ${(call.value ?? 0n).toString(10)} wei · data ${String(call.data ?? '0x')}`,
+      ]),
+      call: (dryRun: boolean) => vault.propose.batch(calls, { ...timing, dryRun }),
+    });
+  },
+});
+
 export const proposeCallCommand = makeProposeCommand<
-  ProposeCommon & { to: string; data?: string; value?: string }
+  ProposeCommon & { to: string; data?: string; value?: string; abi?: string; function?: string; argsJson?: string }
 >({
   path: ['propose', 'call'],
   describe: 'Propose an arbitrary contract call from raw calldata',
@@ -358,11 +654,26 @@ export const proposeCallCommand = makeProposeCommand<
     { flags: '--to <address>', description: 'target contract' },
     { flags: '--data <hex>', description: 'raw calldata' },
     { flags: '--value <quai>', description: 'QUAI to send alongside', defaultValue: '0' },
+    { flags: '--abi <path>', description: 'local JSON ABI file used to encode the call' },
+    { flags: '--function <name|signature>', description: 'function to encode with --abi' },
+    { flags: '--args-json <json>', description: 'JSON array of function arguments', defaultValue: '[]' },
   ],
   action: 'call a contract',
   build: (_ctx, vault, input, timing) => {
     const to = assertRecipient(requireFlag(input.to, '--to'), 'target');
-    const data = (input.data ?? '0x') as `0x${string}`;
+    if (input.data && input.abi) throw new UsageError('Pass either --data or --abi, not both.');
+    let data = (input.data ?? '0x') as `0x${string}`;
+    if (input.abi) {
+      if (!input.function) throw new UsageError('--function is required with --abi.');
+      const document = JSON.parse(readFileSync(input.abi, 'utf8')) as unknown;
+      const abi = Array.isArray(document)
+        ? (document as InterfaceAbi)
+        : (document as { abi?: InterfaceAbi } | null)?.abi;
+      if (!Array.isArray(abi)) throw new UsageError(`${input.abi} does not contain an ABI array.`);
+      const args = JSON.parse(input.argsJson ?? '[]') as unknown;
+      if (!Array.isArray(args)) throw new UsageError('--args-json must be a JSON array.');
+      data = new Interface(abi).encodeFunctionData(input.function, args) as `0x${string}`;
+    }
     if (!/^0x([0-9a-fA-F]{2})*$/.test(data)) {
       throw new UsageError('--data must be 0x-prefixed hex with an even number of digits.');
     }
@@ -374,6 +685,41 @@ export const proposeCallCommand = makeProposeCommand<
         `Data:   ${data.length > 2 ? `${(data.length - 2) / 2} bytes` : '(none)'}`,
       ],
       call: (dryRun: boolean) => vault.propose.call({ to, value, data, ...timing, dryRun }),
+    });
+  },
+});
+
+export const proposeSetupRecoveryCommand = makeProposeCommand<
+  ProposeCommon & { guardian?: string[]; threshold: string; recoveryPeriod: string }
+>({
+  path: ['propose', 'setup-recovery'],
+  describe: 'Propose configuring social recovery',
+  options: [
+    { flags: '--guardian <address...>', description: 'guardian address (repeat for each)' },
+    { flags: '--threshold <n>', description: 'guardian approvals required' },
+    { flags: '--recovery-period <duration>', description: 'delay before execution, e.g. 7d' },
+  ],
+  action: 'configure social recovery',
+  build: (_ctx, vault, input, timing) => {
+    const guardians = (Array.isArray(input.guardian) ? input.guardian : input.guardian ? [input.guardian] : [])
+      .map((guardian) => assertRecipient(guardian, 'guardian'));
+    if (!guardians.length) throw new UsageError('At least one --guardian is required.');
+    if (new Set(guardians.map((guardian) => guardian.toLowerCase())).size !== guardians.length) {
+      throw new UsageError('Duplicate guardian addresses.');
+    }
+    const threshold = Number(requireFlag(input.threshold, '--threshold'));
+    if (!Number.isInteger(threshold) || threshold < 1 || threshold > guardians.length) {
+      throw new UsageError(`--threshold must be between 1 and ${guardians.length}.`);
+    }
+    const recoveryPeriodSeconds = parseDuration(requireFlag(input.recoveryPeriod, '--recovery-period'));
+    return Promise.resolve({
+      detail: [
+        `Guardians: ${threshold} of ${guardians.length}`,
+        ...guardians.map((guardian) => `  ${guardian}`),
+        `Recovery period: ${formatDuration(recoveryPeriodSeconds)}`,
+      ],
+      call: (dryRun: boolean) =>
+        vault.propose.setupRecovery({ guardians, threshold, recoveryPeriodSeconds, ...timing, dryRun }),
     });
   },
 });
@@ -504,7 +850,7 @@ export const proposeModuleCommand = makeProposeCommand<
     }
     // The GUI never accepted a free-text module address; the CLI does, so an
     // unknown module needs the same second flag an unverified decode does.
-    const known = await vault.isModuleEnabled(module).catch(() => false);
+    const known = await vault.isModuleEnabled(module);
     if (input.action === 'enable' && !known && !ctx.flags.iUnderstandUnverified) {
       throw new PreconditionError(
         `${module} is not a module this vault already knows.`,
@@ -619,7 +965,10 @@ export const PROPOSE_COMMANDS = [
   proposeTransferCommand,
   proposeTokenCommand,
   proposeNftCommand,
+  proposeErc1155Command,
+  proposeBatchCommand,
   proposeCallCommand,
+  proposeSetupRecoveryCommand,
   proposeAddOwnerCommand,
   proposeRemoveOwnerCommand,
   proposeThresholdCommand,

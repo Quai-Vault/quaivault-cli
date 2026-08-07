@@ -32,6 +32,7 @@ async function rejectsWith(p: Promise<unknown>, re: RegExp): Promise<void> {
   throw new Error(`expected a rejection matching ${String(re)}`);
 }
 import type { VaultTransaction } from '@quaivault/sdk';
+import { mainnet } from '@quaivault/sdk';
 
 const HASH = fakeTx().hash;
 const abort = new AbortController().signal;
@@ -49,6 +50,7 @@ const permissivePolicy: Policy = {
   denyKinds: [],
   denyDelegatecall: true,
   requireAbiSource: ['builtin'],
+  allowRecoveryActions: [],
 };
 
 describe('execute outcomes map to distinct exit codes', () => {
@@ -99,7 +101,7 @@ describe('assertion flags bind an agent to the bytes, not to prose', () => {
   });
 
   it('refuses when the decode provenance is weaker than demanded', async () => {
-    const ctx = ctxWith(fakeTx({ abiSource: 'heuristic' }));
+    const ctx = ctxWith(fakeTx({ data: '0xdeadbeef' }));
     await expect(
       txApproveCommand.plan!(ctx, { hash: HASH, expectAbiSource: 'builtin' }, abort),
     ).rejects.toThrow(/provenance does not match/);
@@ -113,7 +115,7 @@ describe('assertion flags bind an agent to the bytes, not to prose', () => {
         hash: HASH,
         expectTo: ADDR.alice,
         expectValue: '100',
-        expectAbiSource: 'builtin',
+        expectAbiSource: 'none',
         expectDataHash: keccak256('0xa9059cbb'),
       },
       abort,
@@ -136,6 +138,41 @@ describe('policy bounds non-interactive signing', () => {
       },
     );
     expect(violations.map((v) => v.rule)).toContain('max_value_per_approval_wei');
+  });
+
+  it('counts native value attached to contract calls and every batch effect', () => {
+    const violations = checkPolicy(
+      { ...permissivePolicy, maxValuePerApprovalWei: 10n },
+      {
+        value: 0n,
+        to: ADDR.vault,
+        kind: 'batched_call',
+        isDelegatecall: false,
+        abiSource: 'builtin',
+        approvalsLastHour: 0,
+        effects: [
+          { to: ADDR.alice, value: 6n, kind: 'external_call' },
+          { to: ADDR.bob, value: 5n, kind: 'external_call' },
+        ],
+      },
+    );
+    expect(violations.map((v) => v.rule)).toContain('max_value_per_approval_wei');
+  });
+
+  it('does not apply the approval rate limit to non-approval lifecycle writes', () => {
+    const violations = checkPolicy(
+      { ...permissivePolicy, maxApprovalsPerHour: 0 },
+      {
+        value: 0n,
+        to: ADDR.alice,
+        kind: 'transfer',
+        isDelegatecall: false,
+        abiSource: 'builtin',
+        approvalsLastHour: 9,
+        countTowardApprovalLimit: false,
+      },
+    );
+    expect(violations.map((v) => v.rule)).not.toContain('max_approvals_per_hour');
   });
 
   it('refuses a recipient outside the allowlist', () => {
@@ -198,18 +235,18 @@ describe('confirmation gate', () => {
   });
 
   it('demands a second explicit flag for an unverified decode, even with --yes', async () => {
-    const ctx = ctxWith(fakeTx({ abiSource: 'heuristic' }), {
+    const ctx = ctxWith(fakeTx({ data: '0xdeadbeef' }), {
       flags: { yes: true },
-      policy: { ...permissivePolicy, requireAbiSource: ['builtin', 'heuristic'] },
+      policy: { ...permissivePolicy, requireAbiSource: ['builtin', 'none'] },
     });
     const planned = await txApproveCommand.plan!(ctx, { hash: HASH }, abort);
     await rejectsWith(confirm(ctx, planned, txApproveCommand), /--i-understand-unverified/);
   });
 
   it('accepts an unverified decode once the second flag is given', async () => {
-    const ctx = ctxWith(fakeTx({ abiSource: 'heuristic' }), {
+    const ctx = ctxWith(fakeTx({ data: '0xdeadbeef' }), {
       flags: { yes: true, iUnderstandUnverified: true },
-      policy: { ...permissivePolicy, requireAbiSource: ['builtin', 'heuristic'] },
+      policy: { ...permissivePolicy, requireAbiSource: ['builtin', 'none'] },
     });
     const planned = await txApproveCommand.plan!(ctx, { hash: HASH }, abort);
     await expect(confirm(ctx, planned, txApproveCommand)).resolves.toBe(true);
@@ -270,7 +307,7 @@ describe('the batch gate — the only delegatecall detection that exists', () =>
   // operation byte lives (plan §7, src/abi/batch.ts).
 
   it('refuses an inner delegatecall non-interactively, even under a permissive policy', async () => {
-    const tx = fakeTx({ data: batchWithDelegatecall(), kind: 'batched_call' });
+    const tx = fakeTx({ data: batchWithDelegatecall(), kind: 'batched_call', to: mainnet.contracts.multiSendCallOnly! });
     const ctx = ctxWith(tx, { policy: permissivePolicy, flags: { yes: true } });
     await rejectsWith(
       txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort),
@@ -282,7 +319,7 @@ describe('the batch gate — the only delegatecall detection that exists', () =>
     // Fail closed: bytes we cannot read might be a delegatecall, and a
     // disclosure that showed one sub-call for a blob the chain reads
     // differently would be worse than no disclosure at all.
-    const tx = fakeTx({ data: unreadableBatch(), kind: 'batched_call' });
+    const tx = fakeTx({ data: unreadableBatch(), kind: 'batched_call', to: mainnet.contracts.multiSendCallOnly! });
     const ctx = ctxWith(tx, { policy: permissivePolicy, flags: { yes: true } });
     await rejectsWith(
       txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort),
@@ -296,7 +333,7 @@ describe('the batch gate — the only delegatecall detection that exists', () =>
     // An ERC-20 transfer is the realistic version: it decodes `heuristic`,
     // because the SDK is matching a selector against an address it cannot
     // confirm is a token at all.
-    const tx = fakeTx({ data: batchOfTwo(), kind: 'batched_call', abiSource: 'builtin' });
+    const tx = fakeTx({ data: batchOfTwo(), kind: 'batched_call', to: mainnet.contracts.multiSendCallOnly! });
     const ctx = ctxWith(tx, { policy: permissivePolicy, flags: { yes: true } });
     await rejectsWith(
       txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort),
@@ -305,7 +342,7 @@ describe('the batch gate — the only delegatecall detection that exists', () =>
   });
 
   it('allows a batch whose every sub-call the SDK vouches for', async () => {
-    const tx = fakeTx({ data: batchOfBuiltins(), kind: 'batched_call', abiSource: 'builtin' });
+    const tx = fakeTx({ data: batchOfBuiltins(), kind: 'batched_call', to: mainnet.contracts.multiSendCallOnly! });
     const ctx = ctxWith(tx, { policy: permissivePolicy, flags: { yes: true } });
     const planned = await txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort);
     expect(planned.disclosure.unverified).toBe(false);
@@ -314,7 +351,7 @@ describe('the batch gate — the only delegatecall detection that exists', () =>
   it('marks a delegatecall batch unverified so the second flag is required', async () => {
     // §7's --yes gate is mechanical: an inner delegatecall trips it even
     // though the outer operation is 0 — which it always is.
-    const tx = fakeTx({ data: batchWithDelegatecall(), kind: 'batched_call' });
+    const tx = fakeTx({ data: batchWithDelegatecall(), kind: 'batched_call', to: mainnet.contracts.multiSendCallOnly! });
     const ctx = ctxWith(tx, { policy: null, flags: { yes: true } });
     const planned = await txApproveCommand.plan!(ctx, { vault: ADDR.vault, hash: HASH }, abort);
     expect(planned.disclosure.unverified).toBe(true);

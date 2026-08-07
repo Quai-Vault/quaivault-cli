@@ -99,6 +99,8 @@ export interface CommandSpec<Input = any, Result = any, Plan = any> {
   render: (result: CommandResult<Result>, io: Io, ctx: AppContext) => void;
   /** Render the disclosure between plan and commit. */
   renderPlan?: (planned: WritePlan<Plan>, io: Io, ctx: AppContext) => void;
+  /** Explicit machine-safe dry-run representation. Functions and signer handles never enter JSON. */
+  planToJson?: (planned: WritePlan<Plan>, ctx: AppContext) => JsonValue;
   /** CLI-owned JSON shape. Never the SDK's types verbatim. */
   toJson: (result: CommandResult<Result>, ctx: AppContext) => JsonValue;
   /** Machine-readable description of `toJson`'s shape, for `qv --schema`. */

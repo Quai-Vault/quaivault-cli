@@ -20,6 +20,7 @@ Every `--json` invocation emits this on **stdout**, success or failure:
   "retryable": false,
   "data": { },
   "steps": [ { "name": "approve", "status": "ok", "chainTxHash": "0x…" } ],
+  "error": null,
   "next": ["qv tx show 0x… 0x8a3f…"],
   "untrusted": ["/summary", "/batch/calls/0/summary"],
   "warnings": []
@@ -31,7 +32,18 @@ The error envelope goes to **stdout too**, not stderr. Empty stdout makes
 `terraform -json` and `kubectl -o json` all avoid:
 
 ```json
-{ "schema": 1, "ok": false, "error": { "code": "POLICY", "message": "…", "remediation": "…" } }
+{
+  "schema": 1,
+  "ok": false,
+  "command": "tx approve",
+  "changed": false,
+  "retryable": false,
+  "data": null,
+  "steps": [],
+  "error": { "code": "POLICY", "message": "…", "remediation": "…" },
+  "next": [],
+  "warnings": []
+}
 ```
 
 **All bigints are decimal strings in wei. Never numbers.** `1.5 QUAI` is
@@ -99,6 +111,14 @@ did. On retry it re-reads chain state, finds the approval already present, and
 returns `changed: false`, exit `0`. §4.1 calls this out specifically so nobody
 "optimises" the re-read away. It is why the idempotency row above exists, and
 it is tested.
+
+Proposal creation cannot always be reconciled from a transaction hash the caller
+never received. Supply `--idempotency-key <stable-operation-id>` on `qv propose *`
+commands when retrying is possible. The CLI records the successful vault and chain
+hashes in a durable local journal. The key is scoped to the active profile; repeating
+the same key and inputs returns exit `0`, `changed: false`, while reusing it for
+different inputs fails before signing. The decisive lookup occurs while the signer
+lock is held, so concurrent agents cannot both broadcast the same keyed proposal.
 
 ### Indexer lag after a successful write
 

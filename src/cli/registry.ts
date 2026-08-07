@@ -17,6 +17,7 @@ import { vaultCreateCommand, mineSaltCommand } from '../commands/vault-create.js
 import { watchCommand } from '../commands/watch.js';
 import { tuiCommand } from '../commands/tui.js';
 import { balanceCommand, messagesCommand } from '../commands/balance.js';
+import { ACTIVITY_COMMANDS } from '../commands/activity.js';
 import {
   keyImportCommand,
   keyLsCommand,
@@ -60,6 +61,7 @@ export const REGISTRY: CommandSpec[] = [
   addrCheckCommand,
   balanceCommand,
   messagesCommand,
+  ...ACTIVITY_COMMANDS,
   keyImportCommand,
   keyLsCommand,
   keyUseCommand,

@@ -49,7 +49,9 @@ function buildContext(flags: GlobalFlags, io: Io, held: { signer?: SignerResolut
   let active = createClient({ profile, now });
   const qv = active;
   const policy = loadPolicy();
-  const interactive = canPrompt() && !flags.noInput;
+  // JSON is a protocol, never an interactive presentation. It fails closed
+  // unless the caller separately supplies --yes and a policy file.
+  const interactive = canPrompt() && !flags.noInput && !flags.json;
   const store = new ResultStore(now);
 
   const reverseContacts = new Map<string, string>();
@@ -179,7 +181,12 @@ export async function runCommand(opts: RunOptions): Promise<ExitCodeValue> {
               command: id,
               changed: false,
               retryable: true,
-              data: jsonSafe({ dryRun: true, ...planned }),
+              data: jsonSafe({
+                dryRun: true,
+                preview: opts.spec.planToJson
+                  ? opts.spec.planToJson(planned, active)
+                  : { summary: planned.summary, dataHash: planned.dataHash ?? null },
+              }),
             }),
           );
         }
@@ -220,12 +227,12 @@ export async function runCommand(opts: RunOptions): Promise<ExitCodeValue> {
           ok: true,
           command: id,
           changed: result.changed,
-          retryable: result.retryable,
+          retryable: result.retryable ?? false,
           // jsonSafe at the single choke point: every command's toJson is
           // safe by construction, not by each author remembering.
           data: jsonSafe(opts.spec.toJson(result, ctx)),
-          steps: result.steps ? jsonSafe(result.steps) : undefined,
-          next: result.next ? jsonSafe(result.next) : undefined,
+          steps: jsonSafe(result.steps ?? []),
+          next: jsonSafe(result.next ?? []),
           untrusted: result.untrusted,
           warnings: result.warnings,
         }),
@@ -256,6 +263,7 @@ export async function runCommand(opts: RunOptions): Promise<ExitCodeValue> {
           ok: false,
           command: id,
           changed: false,
+          retryable: retryableErrorCode(e.code),
           error: errorToJson(e),
         }),
       );
@@ -268,6 +276,11 @@ export async function runCommand(opts: RunOptions): Promise<ExitCodeValue> {
     // including a throw.
     held.signer?.release();
   }
+}
+
+/** Conservative retry guidance for errors raised before a broadcast. */
+function retryableErrorCode(code: string): boolean {
+  return ['NO_INDEXER', 'INDEXER_QUERY', 'ABORTED'].includes(code);
 }
 
 export { policyPath };

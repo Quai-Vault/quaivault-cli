@@ -41,19 +41,20 @@ MetaMask, Geth and ethers all export.
 Reading (no key required)
   qv status · qv doctor · qv inbox · qv vault show|ls|receive
   qv tx ls|history|show|wait · qv balance · qv messages · qv addr check
-  qv recovery status|history
+  qv activity deposits|token-transfers · qv recovery status|history
 
 Acting on transactions
   qv tx approve · qv tx unapprove · qv tx execute · qv tx cancel · qv tx expire
 
 Proposing changes  (every one of these asks your co-owners to act)
-  qv propose transfer|token|nft|call
+  qv propose transfer|token|nft|erc1155|call|batch
   qv propose add-owner|remove-owner|threshold|delay
   qv propose module|delegatecall|sign-message|cancel-by-consensus
+  qv propose setup-recovery
 
 Vaults, recovery, setup
   qv vault create · qv vault mine-salt
-  qv recovery approve|execute|cancel|initiate
+  qv recovery approve|unapprove|execute|cancel|expire|initiate
   qv key import|ls|use|rm|rename|change-password|export
   qv use · qv alias · qv contact · qv policy · qv watch · qv tui
 ```
@@ -102,7 +103,7 @@ delegatecall — is labelled as such and needs `--i-understand-unverified` to si
 ```bash
 qv inbox --json            # structured, with affordances
 qv tx show <v> <h> --json  # includes a `verify` block to assert against
-qv --schema                # every command, flag and output shape
+qv --schema --schema-version 1  # every command, flag and output shape
 ```
 
 - **`--json` is a versioned CLI-owned schema** (`{"schema": 1, …}`). Every bigint is a
@@ -115,6 +116,9 @@ qv --schema                # every command, flag and output shape
   approved is a no-op with `changed: false`, exit 0 — so a retry after a timeout is safe.
 - **Assert, don't trust prose:** `--expect-data-hash`, `--expect-to`, `--expect-value`,
   `--expect-abi-source` all fail closed against re-read chain state before signing.
+- **Retry proposals deliberately:** pass `--idempotency-key <stable-operation-id>`. Successful
+  broadcasts are journaled durably, and a retry with the same inputs returns `changed: false`;
+  reusing the key for different inputs fails closed.
 
 ### Agents may sign, within a policy
 
@@ -131,6 +135,7 @@ allow_to                   = []
 deny_kinds                 = ["wallet_admin", "module_config", "recovery_setup"]
 deny_delegatecall          = true
 require_abi_source         = ["builtin"]
+allow_recovery_actions     = ["cancel", "expire"]
 ```
 
 There is deliberately no flag to relocate it and no environment override — a bound the
@@ -217,6 +222,8 @@ and dotfile repositories.
 
 ## Further reading
 
+- [`CAPABILITIES.md`](CAPABILITIES.md) — web-frontend capability parity and the intentional
+  boundaries between one-shot and TUI workflows.
 - [`docs/agent-contract.md`](docs/agent-contract.md) — the full
   `{exitCode, changed, retryable}` table, the `verify` block, and how to bind
   an agent to bytes rather than to prose.
@@ -232,8 +239,7 @@ and dotfile repositories.
 ## Development
 
 ```bash
-npm run check    # typecheck + lint + test
-npm run build
+npm run check    # typecheck + lint + production build + test
 npm pack         # inspect the tarball before publishing
 ```
 

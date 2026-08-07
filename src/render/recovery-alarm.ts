@@ -24,17 +24,11 @@ export interface RecoveryAlarm {
 }
 
 export async function recoveryAlarm(ctx: AppContext, vault: string): Promise<RecoveryAlarm | null> {
-  let pending: RecoveryRequest[];
-  try {
-    const recovery = ctx.qv.vault(vault).recovery;
-    // `hasPending` is cheap; only pay for the detail when something is there.
-    if (!(await recovery.hasPending())) return null;
-    pending = await recovery.pending();
-  } catch {
-    // A vault with no recovery module, or an indexer that cannot answer, is
-    // not an alarm condition — and must not break the command that asked.
-    return null;
-  }
+  const recovery = ctx.qv.vault(vault).recovery;
+  if (!(await recovery.isEnabled())) return null;
+  // `hasPending` is cheap; only pay for the detail when something is there.
+  if (!(await recovery.hasPending())) return null;
+  const pending: RecoveryRequest[] = await recovery.pending();
   const first = pending[0];
   if (!first) return null;
   const hash = first.hash;

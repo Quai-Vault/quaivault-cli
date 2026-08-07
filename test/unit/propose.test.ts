@@ -108,3 +108,29 @@ describe('the timelock cap comes from the contract, not from a guess', () => {
     expect(planned.disclosure.action).toBeTruthy();
   });
 });
+
+describe('proposal agent policy', () => {
+  it('checks the encoded proposal before unlocking a signer', async () => {
+    const ctx = createFakeContext({
+      client: createFakeClient({ vaults: { [ADDR.vault]: { info: fakeVaultInfo() } } }),
+      identity: ADDR.alice,
+      now: NOW,
+      flags: { yes: true },
+      policy: {
+        maxValuePerApprovalWei: 1n,
+        allowTo: [],
+        denyKinds: [],
+        denyDelegatecall: true,
+        requireAbiSource: ['builtin'],
+        allowRecoveryActions: [],
+      },
+    });
+    await expect(
+      proposeTransferCommand.plan!(
+        ctx,
+        { vault: ADDR.vault, to: ADDR.carol, amountWei: '2' },
+        abort,
+      ),
+    ).rejects.toThrow(/Refused by policy/);
+  });
+});

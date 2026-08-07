@@ -30,7 +30,7 @@ export const vaultShowCommand: CommandSpec<{ vault?: string }, VaultShowData> = 
     const vault = ctx.qv.vault(address);
     const [info, pending, health, alarm] = await Promise.all([
       vault.info(),
-      vault.pendingTransactions().catch(() => [] as VaultTransaction[]),
+      vault.pendingTransactions(),
       ctx.qv.indexerHealth().catch(() => null),
       recoveryAlarm(ctx, address),
     ]);

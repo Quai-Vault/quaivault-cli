@@ -4,6 +4,7 @@ import type {
   RecoveryRequest,
   VaultTransaction,
 } from '@quaivault/sdk';
+import { mapPooled } from '@quaivault/sdk';
 import type { CommandSpec } from '../cli/spec.js';
 import { cacheKey } from '../store/index.js';
 import { UsageError } from '../context/context.js';
@@ -49,8 +50,12 @@ interface InboxData {
   items: InboxItem[];
   recoveries: RecoveryItem[];
   vaultCount: number;
+  discoveredVaultCount: number;
+  truncated: boolean;
   chainHead?: number;
   degraded: boolean;
+  countOnly: boolean;
+  actionableCount: number;
 }
 
 const EXPIRING_SOON_SECONDS = 24 * 3600;
@@ -74,44 +79,41 @@ export const inboxCommand: CommandSpec<{ count?: boolean; limit?: string }, Inbo
   describe: 'What is waiting on you, across every vault',
   options: [
     { flags: '--count', description: 'print a bare integer for a shell prompt', defaultValue: false },
-    { flags: '--limit <n>', description: 'max vaults to scan', defaultValue: '25' },
+    { flags: '--limit <n>', description: 'max vaults to scan', defaultValue: '200' },
   ],
   needs: { identity: true, indexer: 'required' },
 
   async run(ctx, input) {
     const identity = ctx.identity();
     if (!identity) throw new UsageError('No identity set.');
-    const limit = Number(input.limit ?? 25);
+    const limit = Number(input.limit ?? 200);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw new UsageError('--limit must be a whole number from 1 to 200.');
+    }
 
     const [owned, guardian, health] = await Promise.all([
-      ctx.qv.vaults.forOwner(identity).catch(() => [] as string[]),
-      ctx.qv.vaults.forGuardian(identity).catch(() => [] as string[]),
+      ctx.qv.vaults.forOwner(identity),
+      ctx.qv.vaults.forGuardian(identity),
       ctx.qv.indexerHealth().catch(() => null),
     ]);
-    const all = [...new Set([...owned, ...guardian].map((a) => a))].slice(0, limit);
+    const discovered = [...new Set([...owned, ...guardian].map((a) => a))];
+    const all = discovered.slice(0, limit);
 
     const items: InboxItem[] = [];
     const recoveries: RecoveryItem[] = [];
     const now = ctx.now();
 
-    await Promise.all(
-      all.map(async (address) => {
+    await mapPooled(all, 6, async (address) => {
         const vault = ctx.qv.vault(address);
 
         // Read before the early return below. A guardian-only identity has no
         // pending transactions on a vault it guards, and the previous shape
         // returned at that point — so the one thing a guardian is here for
         // never reached the inbox at all.
-        const pendingRecoveries = await vault.recovery
-          .pending()
-          .catch(() => [] as RecoveryRequest[]);
+        const pendingRecoveries = await vault.recovery.pending();
         if (pendingRecoveries.length) {
           const sets = await Promise.all(
-            pendingRecoveries.map((r) =>
-              vault.recovery
-                .affordances(r.hash, identity)
-                .catch(() => [] as RecoveryAffordance[]),
-            ),
+            pendingRecoveries.map((r) => vault.recovery.affordances(r.hash, identity)),
           );
           pendingRecoveries.forEach((recovery, i) => {
             const affordances = sets[i] ?? [];
@@ -127,16 +129,11 @@ export const inboxCommand: CommandSpec<{ count?: boolean; limit?: string }, Inbo
           });
         }
 
-        let pending: VaultTransaction[] = [];
-        try {
-          pending = await vault.pendingTransactions({ limit: 50 });
-        } catch {
-          return;
-        }
+        const pending: VaultTransaction[] = await vault.pendingTransactions({ limit: 50 });
         if (pending.length === 0) return;
         // One batched affordance pass per transaction, keyless.
         const affordanceSets = await Promise.all(
-          pending.map((tx) => vault.affordances(tx.hash, identity).catch(() => [] as Affordance[])),
+          pending.map((tx) => vault.affordances(tx.hash, identity)),
         );
         pending.forEach((tx, i) => {
           const affordances = affordanceSets[i] ?? [];
@@ -164,8 +161,7 @@ export const inboxCommand: CommandSpec<{ count?: boolean; limit?: string }, Inbo
             affordances,
           });
         });
-      }),
-    );
+      });
 
     const order: Bucket[] = ['needsYou', 'readyToExecute', 'expiringSoon', 'waitingOnOthers'];
     items.sort((a, b) => {
@@ -186,15 +182,30 @@ export const inboxCommand: CommandSpec<{ count?: boolean; limit?: string }, Inbo
         items,
         recoveries,
         vaultCount: all.length,
+        discoveredVaultCount: discovered.length,
+        truncated: discovered.length > all.length,
         chainHead: health?.chainHead,
         degraded: health?.available === false,
+        countOnly: input.count === true,
+        actionableCount:
+          items.filter((item) => item.bucket === 'needsYou' || item.bucket === 'readyToExecute').length +
+          recoveries.filter((recovery) => recovery.actionable).length,
       },
       changed: false,
+      warnings:
+        discovered.length > all.length
+          ? [`Scanned ${all.length} of ${discovered.length} vaults; increase --limit for a complete inbox.`]
+          : undefined,
     };
   },
 
   render(result, io, ctx) {
     const { identity, items, recoveries, vaultCount, chainHead, degraded } = result.data;
+
+    if (result.data.countOnly) {
+      io.out(String(result.data.actionableCount));
+      return;
+    }
 
     if (ctx.flags.quiet) return;
 
@@ -268,9 +279,12 @@ export const inboxCommand: CommandSpec<{ count?: boolean; limit?: string }, Inbo
   },
 
   toJson(result) {
+    if (result.data.countOnly) return { count: result.data.actionableCount };
     return {
       identity: result.data.identity,
       vaultCount: result.data.vaultCount,
+      discoveredVaultCount: result.data.discoveredVaultCount,
+      truncated: result.data.truncated,
       degraded: result.data.degraded,
       counts: {
         needsYou: result.data.items.filter((i) => i.bucket === 'needsYou').length,
@@ -315,6 +329,8 @@ export const inboxCommand: CommandSpec<{ count?: boolean; limit?: string }, Inbo
     properties: {
       identity: { type: 'string' },
       vaultCount: { type: 'integer' },
+      discoveredVaultCount: { type: 'integer' },
+      truncated: { type: 'boolean' },
       degraded: { type: 'boolean' },
       counts: { type: 'object' },
       items: { type: 'array' },
@@ -335,14 +351,14 @@ export const inboxCountCommand: CommandSpec<Record<string, never>, { count: numb
   needs: { identity: true, indexer: 'required' },
 
   async run(ctx, _input, signal) {
-    const result = await inboxCommand.run!(ctx, { limit: '25' }, signal);
+    const result = await inboxCommand.run!(ctx, { limit: '200' }, signal);
     const count =
       result.data.items.filter((i) => i.bucket === 'needsYou' || i.bucket === 'readyToExecute')
         .length +
       // A guardian's only actionable item is a recovery. Leaving it out meant
       // a prompt counter read zero while a recovery sat waiting on them.
       result.data.recoveries.filter((r) => r.actionable).length;
-    return { data: { count }, changed: false };
+    return { data: { count }, changed: false, warnings: result.warnings };
   },
   render: (result, io) => io.out(String(result.data.count)),
   toJson: (r) => ({ count: r.data.count }),

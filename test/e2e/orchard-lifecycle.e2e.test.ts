@@ -109,7 +109,10 @@ describe.skipIf(!available)('Orchard fixture vaults', () => {
     pending: ['pending'],
     cancelled: ['cancelled'],
     ready: ['ready'],
-    timelocked: ['timelocked'],
+    // This fixture is persistent. Once its chain timestamp passes the delay,
+    // the same immutable transaction correctly advances from timelocked to
+    // ready; requiring it to stay timelocked makes the test expire with time.
+    timelocked: ['timelocked', 'ready'],
     executed: ['executed'],
     failed: ['failed'],
     expired: ['expired'],

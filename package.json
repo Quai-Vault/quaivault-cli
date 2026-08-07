@@ -1,6 +1,6 @@
 {
   "name": "@quaivault/cli",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Command-line client for QuaiVault multisig vaults on Quai Network",
   "license": "MIT",
   "author": "QuaiVault",
@@ -47,7 +47,7 @@
     "test:sdk-contract": "vitest run test/contract",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "lint": "eslint src test scripts --max-warnings 0",
-    "check": "npm run typecheck && npm run lint && npm test",
+    "check": "npm run typecheck && npm run lint && npm run build && npm test",
     "prepublishOnly": "npm run check && npm run build"
   },
   "dependencies": {

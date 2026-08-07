@@ -5,11 +5,10 @@ internal consistency, security, architecture, product). Revision 2 had accumulat
 damage — duplicate section numbers, orphaned cross-references, scope added in one section and
 propagated to none — that patching it again was the wrong move.
 
-Status: **Phases 0–9 implemented**, published at `Quai-Vault/quaivault-cli`. Phase 10 is
-measured and deferred — see `docs/r4-ipfs-measurement.md`. This file is kept as the design
-record it was written to be: where reality has since diverged from it, the divergence is
-noted inline rather than edited away, because a plan silently rewritten to match the code
-stops being a check on the code.
+Status: **v0.4 design record; v0.5 security, agent-contract, and capability-parity hardening is
+implemented in the current tree.** Phase 10 is measured and deferred — see
+`docs/r4-ipfs-measurement.md`. Current capability status lives in `CAPABILITIES.md`; this file is
+kept as the design record it was written to be.
 
 Claims marked *(verified)* were checked against source or a live system on 2026-07-29. Claims
 without it are reasoning, not fact — the distinction is deliberate and load-bearing.
@@ -30,9 +29,10 @@ available; `qv` collides with a crates.io tool, documented)*.
 
 ### 1.0 This project's second job: prove out the SDK
 
-**The CLI is `@quaivault/sdk`'s first real consumer.** `quaivault-frontend` is a separate project,
-does not depend on the SDK, and is **out of scope here entirely** — it is not a parity target, not
-a requirement source, and not something this plan tracks.
+**The CLI is `@quaivault/sdk`'s first real consumer.** The SDK and contracts remain authoritative
+for chain behavior and types. `quaivault-frontend` is now a capability reference: the CLI and TUI
+track its vault, asset, proposal, lifecycle, history, and recovery workflows without importing its
+implementation or weakening terminal-specific security boundaries.
 
 That makes proving the SDK a deliverable, not a side effect. Two consequences:
 
@@ -774,7 +774,7 @@ risk.
 | Write architecture | **`plan`/`commit` split**, decided before Phase 1 |
 | `--json` errors | **stdout**, not stderr |
 | State reporting | `changed` tri-state + `retryable` + `steps[]` |
-| Project role | **The CLI is the SDK's first real consumer and its proving ground** (§1.0). The frontend is a separate project and out of scope entirely |
+| Project role | **The CLI is the SDK's first real consumer and its proving ground** (§1.0). The frontend is a capability-parity reference, not a source of chain truth or types |
 | IPFS gateways | **`ipfs.qu.ai` for contract ABIs; `ipfs.io` for NFT metadata.** Not fallbacks for each other |
 | NFT metadata | **In scope, narrowly** — name and collection only, no images |
 

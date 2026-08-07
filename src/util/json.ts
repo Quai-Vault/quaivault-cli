@@ -56,14 +56,14 @@ export function envelope(input: Envelope): string {
     schema: input.schema,
     ok: input.ok,
     command: input.command,
+    changed: input.changed ?? false,
+    retryable: input.retryable ?? false,
+    data: input.data ?? null,
+    steps: input.steps ?? [],
+    error: input.error ?? null,
+    next: input.next ?? [],
+    warnings: input.warnings ?? [],
   };
-  if (input.changed !== undefined) ordered.changed = input.changed;
-  if (input.retryable !== undefined) ordered.retryable = input.retryable;
-  if (input.data !== undefined) ordered.data = input.data;
-  if (input.steps !== undefined) ordered.steps = input.steps;
-  if (input.error !== undefined) ordered.error = input.error;
-  if (input.next !== undefined) ordered.next = input.next;
   if (input.untrusted?.length) ordered.untrusted = input.untrusted;
-  if (input.warnings?.length) ordered.warnings = input.warnings;
   return JSON.stringify(ordered, null, 2);
 }

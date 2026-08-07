@@ -1,4 +1,4 @@
-import type { Affordance, VaultTransaction } from '@quaivault/sdk';
+import type { Affordance, RecoveryAffordance, TokenBalance, VaultTransaction } from '@quaivault/sdk';
 import type { BatchAnalysis } from '../abi/batch.js';
 
 /**
@@ -20,6 +20,7 @@ export type Pane =
   | 'inbox'
   | 'history'
   | 'activity'
+  | 'assets'
   | 'vault'
   | 'recovery'
   | 'policy'
@@ -30,6 +31,7 @@ export const PANES: readonly Pane[] = [
   'inbox',
   'history',
   'activity',
+  'assets',
   'vault',
   'recovery',
   'policy',
@@ -79,6 +81,7 @@ export interface VaultDetail {
   minExecutionDelay: number;
   modules: string[];
   balanceWei: bigint;
+  tokens?: TokenBalance[];
 }
 
 export interface RecoveryDetail {
@@ -89,6 +92,8 @@ export interface RecoveryDetail {
   required: number;
   executableAt?: number;
   expiration?: number;
+  affordances?: RecoveryAffordance[];
+  additional?: number;
 }
 
 /** One line of the change feed. Topic and type only — never a raw row (§8 R10). */
@@ -110,10 +115,21 @@ export interface LoadState {
 export type ProposeKind =
   | 'transfer'
   | 'token'
+  | 'nft'
+  | 'erc1155'
+  | 'call'
+  | 'batch'
   | 'add-owner'
+  | 'remove-owner'
   | 'threshold'
   | 'delay'
-  | 'delegatecall';
+  | 'module'
+  | 'delegatecall'
+  | 'cancel-by-consensus'
+  | 'sign-message'
+  | 'setup-recovery'
+  | 'initiate-recovery'
+  | 'create-vault';
 
 /**
  * The literal a user types to arm `--i-understand-unverified`.
@@ -153,10 +169,32 @@ export const FORM_FIELDS: Record<ProposeKind, readonly FormField[]> = {
     { name: 'expiration', label: 'expires', hint: '7d, 24h, or blank', required: false },
     { name: 'executionDelay', label: 'delay', hint: 'extra timelock, or blank', required: false },
   ],
+  nft: [
+    { name: 'token', label: 'collection', hint: '0x… ERC-721 contract', required: true },
+    { name: 'to', label: 'to', hint: '0x… recipient', required: true },
+    { name: 'tokenId', label: 'token id', hint: 'integer token id', required: true },
+  ],
+  erc1155: [
+    { name: 'token', label: 'token', hint: '0x… ERC-1155 contract', required: true },
+    { name: 'to', label: 'to', hint: '0x… recipient', required: true },
+    { name: 'tokenId', label: 'token id', hint: 'integer token id', required: true },
+    { name: 'amount', label: 'amount', hint: 'raw quantity', required: true },
+  ],
+  call: [
+    { name: 'to', label: 'contract', hint: '0x… target contract', required: true },
+    { name: 'data', label: 'calldata', hint: '0x… encoded calldata', required: true },
+    { name: 'value', label: 'value', hint: 'QUAI, blank for zero', required: false },
+  ],
+  batch: [
+    { name: 'request', label: 'request file', hint: 'path to batch JSON', required: true },
+  ],
   'add-owner': [
     { name: 'owner', label: 'owner', hint: '0x… new owner', required: true },
     { name: 'expiration', label: 'expires', hint: '7d, 24h, or blank', required: false },
     { name: 'executionDelay', label: 'delay', hint: 'extra timelock, or blank', required: false },
+  ],
+  'remove-owner': [
+    { name: 'owner', label: 'owner', hint: '0x… owner to remove', required: true },
   ],
   threshold: [
     { name: 'threshold', label: 'threshold', hint: 'new signature count', required: true },
@@ -167,6 +205,11 @@ export const FORM_FIELDS: Record<ProposeKind, readonly FormField[]> = {
     { name: 'minDelay', label: 'min timelock', hint: "the vault's new floor, e.g. 24h or 0", required: true },
     { name: 'expiration', label: 'expires', hint: '7d, 24h, or blank', required: false },
     { name: 'executionDelay', label: 'delay', hint: 'extra timelock, or blank', required: false },
+  ],
+  module: [
+    { name: 'action', label: 'action', hint: 'enable or disable', required: true },
+    { name: 'module', label: 'module', hint: '0x… module address', required: true },
+    { name: 'acknowledge', label: 'acknowledge', hint: `to enable, type ${UNVERIFIED_ACK}`, required: false },
   ],
   delegatecall: [
     { name: 'action', label: 'action', hint: 'add or rm', required: true },
@@ -179,6 +222,27 @@ export const FORM_FIELDS: Record<ProposeKind, readonly FormField[]> = {
     },
     { name: 'expiration', label: 'expires', hint: '7d, 24h, or blank', required: false },
     { name: 'executionDelay', label: 'delay', hint: 'extra timelock, or blank', required: false },
+  ],
+  'cancel-by-consensus': [
+    { name: 'hash', label: 'transaction', hint: 'full transaction hash', required: true },
+  ],
+  'sign-message': [
+    { name: 'message', label: 'message', hint: '0x… bytes', required: true },
+    { name: 'action', label: 'action', hint: 'sign or unsign', required: true },
+  ],
+  'setup-recovery': [
+    { name: 'guardians', label: 'guardians', hint: 'comma-separated addresses', required: true },
+    { name: 'threshold', label: 'threshold', hint: 'guardian approvals required', required: true },
+    { name: 'recoveryPeriod', label: 'period', hint: 'e.g. 7d', required: true },
+  ],
+  'initiate-recovery': [
+    { name: 'owners', label: 'new owners', hint: 'comma-separated addresses', required: true },
+    { name: 'threshold', label: 'threshold', hint: 'new owner threshold', required: true },
+  ],
+  'create-vault': [
+    { name: 'owners', label: 'owners', hint: 'comma-separated addresses', required: true },
+    { name: 'threshold', label: 'threshold', hint: 'approvals required', required: true },
+    { name: 'minDelay', label: 'timelock', hint: 'e.g. 24h or 0', required: false },
   ],
 };
 
@@ -731,6 +795,30 @@ export function missingFields(form: FormState): string[] {
 export function formArgv(form: FormState, vault: string): string[] | null {
   if (missingFields(form).length) return null;
   const v = (name: string): string => (form.values[name] ?? '').trim();
+  if (form.kind === 'create-vault') {
+    const argv = [
+      'vault',
+      'create',
+      '--owner',
+      ...v('owners').split(',').map((owner) => owner.trim()).filter(Boolean),
+      '--threshold',
+      v('threshold'),
+    ];
+    if (v('minDelay')) argv.push('--min-delay', v('minDelay'));
+    return argv;
+  }
+  if (!vault) return null;
+  if (form.kind === 'initiate-recovery') {
+    return [
+      'recovery',
+      'initiate',
+      vault,
+      '--owner',
+      ...v('owners').split(',').map((owner) => owner.trim()).filter(Boolean),
+      '--threshold',
+      v('threshold'),
+    ];
+  }
   const argv: string[] = ['propose', form.kind, vault];
 
   switch (form.kind) {
@@ -740,7 +828,23 @@ export function formArgv(form: FormState, vault: string): string[] | null {
     case 'token':
       argv.push('--token', v('token'), '--to', v('to'), '--amount', v('amount'));
       break;
+    case 'nft':
+      argv.push('--token', v('token'), '--to', v('to'), '--token-id', v('tokenId'));
+      break;
+    case 'erc1155':
+      argv.push('--token', v('token'), '--to', v('to'), '--token-id', v('tokenId'), '--amount', v('amount'));
+      break;
+    case 'call':
+      argv.push('--to', v('to'), '--data', v('data'));
+      if (v('value')) argv.push('--value', v('value'));
+      break;
+    case 'batch':
+      argv.push('--request', v('request'));
+      break;
     case 'add-owner':
+      argv.push(v('owner'));
+      break;
+    case 'remove-owner':
       argv.push(v('owner'));
       break;
     case 'threshold':
@@ -748,6 +852,12 @@ export function formArgv(form: FormState, vault: string): string[] | null {
       break;
     case 'delay':
       argv.push(v('minDelay'));
+      break;
+    case 'module':
+      argv.push(v('action'), v('module'));
+      if (v('action') === 'enable' && v('acknowledge') === UNVERIFIED_ACK) {
+        argv.push('--i-understand-unverified');
+      }
       break;
     case 'delegatecall': {
       argv.push(v('action'), v('target'));
@@ -760,6 +870,23 @@ export function formArgv(form: FormState, vault: string): string[] | null {
       }
       break;
     }
+    case 'cancel-by-consensus':
+      argv.push(v('hash'));
+      break;
+    case 'sign-message':
+      argv.push(v('message'));
+      if (v('action') === 'unsign') argv.push('--unsign');
+      break;
+    case 'setup-recovery':
+      argv.push(
+        '--guardian',
+        ...v('guardians').split(',').map((guardian) => guardian.trim()).filter(Boolean),
+        '--threshold',
+        v('threshold'),
+        '--recovery-period',
+        v('recoveryPeriod'),
+      );
+      break;
     default: {
       const never: never = form.kind;
       throw new Error(`unhandled propose kind: ${String(never)}`);

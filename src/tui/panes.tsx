@@ -6,6 +6,7 @@ import {
   formatApproximateAge,
   formatDuration,
   formatQuai,
+  formatUnits,
   safeText,
   viewCalldata,
 } from '../format/index.js';
@@ -343,6 +344,8 @@ function BatchBlock({
               {'  value  '}
               {formatQuai(call.value)} QUAI
             </Text>
+            {call.value > 0n ? <Text>{`  exactly ${call.value.toString(10)} wei`}</Text> : null}
+            <Text>{`  data   ${call.data}`}</Text>
           </Box>
         );
       })}
@@ -379,6 +382,33 @@ export function VaultPane({ state, env }: { state: TuiState; env: TuiEnv }): Rea
   );
 }
 
+// ------------------------------------------------------------------ assets
+
+export function AssetsPane({ state }: { state: TuiState; env: TuiEnv }): React.ReactElement {
+  const detail = state.vaultDetail;
+  if (!detail) return <Text dimColor>Asset data unavailable or still loading.</Text>;
+  return (
+    <Box flexDirection="column">
+      <Row label="QUAI" value={`${formatQuai(detail.balanceWei)} QUAI`} />
+      <Box height={1} />
+      {(detail.tokens ?? []).length ? (
+        (detail.tokens ?? []).map((token) => (
+          <Row
+            key={`${token.token}:${token.standard}`}
+            label={safeText(token.symbol, 12)}
+            value={`${formatUnits(token.balance, token.decimals)} ${token.standard}` +
+              `${token.verified ? ' · verified' : ' · indexed'} · ${token.token}` +
+              `${token.tokenIds?.length ? ` · ids ${token.tokenIds.join(', ')}` : ''}` +
+              `${token.tokenIdsTruncated ? ' (partial id list)' : ''}`}
+          />
+        ))
+      ) : (
+        <Text dimColor>No indexed token holdings.</Text>
+      )}
+    </Box>
+  );
+}
+
 // ---------------------------------------------------------------- recovery
 
 export function RecoveryPane({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElement {
@@ -392,6 +422,11 @@ export function RecoveryPane({ state, env }: { state: TuiState; env: TuiEnv }): 
       <Text color="red" bold>
         RECOVERY PENDING — this replaces the entire owner set.
       </Text>
+      {(r.additional ?? 0) > 0 ? (
+        <Text color="yellow">
+          {r.additional ?? 0} additional pending recovery request(s); `qv recovery status` shows all.
+        </Text>
+      ) : null}
       <Box height={1} />
       <Row label="Approvals" value={`${r.approvals} of ${r.required} guardians`} />
       <Row
@@ -412,6 +447,13 @@ export function RecoveryPane({ state, env }: { state: TuiState; env: TuiEnv }): 
         a approves it as a guardian · x executes it once the delay has elapsed. Each opens a
         separate process that shows you the new owner set before signing.
       </Text>
+      {(r.affordances ?? [])
+        .filter((item) => !item.allowed)
+        .map((item) => (
+          <Text key={item.action} dimColor>
+            {item.action}: {safeText(item.reason, 160)}
+          </Text>
+        ))}
     </Box>
   );
 }

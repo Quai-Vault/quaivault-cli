@@ -6,6 +6,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is `0.x`, minor bumps may contain breaking changes.
 
+## [0.5.0] — 2026-08-06
+
+### Security
+
+- Transaction lifecycle writes now build disclosures from the vault contract,
+  fingerprint that state, acquire the signing lock, then reread and revalidate the
+  exact chain transaction immediately before broadcast. Indexed state remains useful
+  for discovery, never for authorizing a signature.
+- Non-interactive policy checks account for decoded recipients inside token and batch
+  calls, enforce the real hourly approval count from a durable journal, and explicitly
+  gate direct recovery actions. Corrupt security journals fail closed.
+- Proposal commands accept `--idempotency-key`. Reconciliation is repeated while the
+  signer lock is held, preventing concurrent agents from broadcasting duplicate keyed
+  proposals; key reuse with different inputs is refused.
+- Recovery execution requires exact owner-set, threshold, and execution-time
+  expectations when unattended, plus the fixed-path policy and `--yes`.
+
+### Added
+
+- Proposal coverage for ERC-1155, atomic JSON batches, ABI-assisted calls, and recovery
+  setup; deposit/token-transfer reads; and recovery unapprove/expire lifecycle actions.
+- An assets pane and forms/actions covering vault creation, the proposal family, and
+  recovery workflows in the TUI.
+- Versioned schema negotiation, complete JSON envelopes, binary-level JSON contract
+  tests, explicit SDK capability-path coverage, and `CAPABILITIES.md`.
+
+### Changed
+
+- `--json` implies non-interactive operation and emits exactly one total envelope on
+  stdout, including usage failures. Dry runs serialize a stable public plan.
+- Every successful broadcast includes its chain transaction hash in command data and
+  structured steps. Pagination and `inbox --count` report what was actually fetched.
+- TUI refreshes are event-driven and coalesced, with polling as a missed-event backstop;
+  subscriptions rebalance as vault membership changes, and read failures remain visible.
+- `npm run check` includes the production build so binary contract tests cannot run
+  against stale artifacts.
+
+### Fixed
+
+- `tx wait` preserves timeout/transient retryability; message rendering uses the SDK's
+  actual fields; recovery initiation returns the correct recovery hash; and recovery
+  actions consistently expose vault, recovery, and chain hashes.
+
 ## [0.4.0] — 2026-08-06
 
 ### Fixed

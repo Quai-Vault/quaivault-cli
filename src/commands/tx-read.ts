@@ -102,12 +102,12 @@ export const txShowCommand: CommandSpec<{ vault?: string; hash: string }, TxShow
     ]);
     let affordances: Affordance[] = [];
     if (caller) {
-      affordances = await vault.affordances(hash, caller).catch(() => []);
+      affordances = await vault.affordances(hash, caller);
     }
     const next: string[] = [];
     for (const a of affordances.filter((x) => x.allowed)) {
-      if (a.action === 'approve') next.push(`qv tx approve ${address} ${hash.slice(0, 10)}`);
-      if (a.action === 'execute') next.push(`qv tx execute ${address} ${hash.slice(0, 10)}`);
+      if (a.action === 'approve') next.push(`qv tx approve ${address} ${hash}`);
+      if (a.action === 'execute') next.push(`qv tx execute ${address} ${hash}`);
     }
     // Computed once here so `render` and `toJson` cannot disagree about what
     // is inside a batch, and so the untrusted-pointer list covers every
@@ -249,16 +249,16 @@ export const txLsCommand: CommandSpec<{ vault?: string; limit?: string }, TxList
     let transactions: VaultTransaction[] = [];
     let degraded = false;
     try {
-      transactions = await ctx.qv.vault(address).pendingTransactions({ limit });
+      transactions = await ctx.qv.vault(address).pendingTransactions({ limit: limit + 1 });
     } catch {
       degraded = true;
     }
     return {
       data: {
-        transactions,
+        transactions: transactions.slice(0, limit),
         chainHead: health?.chainHead,
-        total: transactions.length,
-        hasMore: false,
+        total: null,
+        hasMore: transactions.length > limit,
         degraded: degraded || health?.available === false,
       },
       changed: false,
@@ -304,14 +304,15 @@ export const txHistoryCommand: CommandSpec<
     const address = ctx.resolveVault(input.vault);
     const limit = Number(input.limit ?? 50);
     const [page, health] = await Promise.all([
-      ctx.qv.vault(address).transactionHistory({ limit }),
+      ctx.qv.vault(address).transactionHistory({
+        limit,
+        ...(input.status ? { status: [input.status] } : {}),
+      }),
       ctx.qv.indexerHealth().catch(() => null),
     ]);
-    const wanted = input.status as TransactionStatus | undefined;
-    const transactions = wanted ? page.data.filter((t) => t.status === wanted) : page.data;
     return {
       data: {
-        transactions,
+        transactions: page.data,
         chainHead: health?.chainHead,
         total: page.total,
         hasMore: page.hasMore,
@@ -354,16 +355,21 @@ export const txWaitCommand: CommandSpec<
       await vault.waitForExecutable(hash, { timeoutMs, signal });
     } catch (err) {
       const tx = await vault.transaction(hash);
-      throw new PreconditionError(
-        `Transaction is not executable and waiting will not help: status is ${tx.status}.`,
-        err instanceof Error ? err.message : undefined,
-      );
+      if (['executed', 'cancelled', 'expired', 'failed'].includes(tx.status)) {
+        throw new PreconditionError(
+          `Transaction is terminal and cannot become executable: status is ${tx.status}.`,
+          err instanceof Error ? err.message : undefined,
+        );
+      }
+      // Preserve SDK timeout/abort/transient errors so the machine envelope
+      // can accurately mark them retryable.
+      throw err;
     }
     const tx = await vault.transaction(hash);
     return {
       data: { hash, status: tx.status, ready: tx.status === 'ready' },
       changed: false,
-      next: [`qv tx execute ${address} ${hash.slice(0, 10)}`],
+      next: [`qv tx execute ${address} ${hash}`],
     };
   },
 

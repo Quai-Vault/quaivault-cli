@@ -10,6 +10,8 @@ import type { Io } from '../render/io.js';
 import { batchOf, renderDisclosure } from '../render/transaction.js';
 import { isUnverified, type BatchAnalysis } from '../abi/batch.js';
 import { resolveTxHash } from './tx-read.js';
+import { transactionFingerprint, transactionFromChain } from '../sdk/chain-transaction.js';
+import { recentPolicyActionCount, recordPolicyAction } from '../context/policy-journal.js';
 
 interface LifecycleInput {
   vault?: string;
@@ -28,6 +30,7 @@ interface Disclosure {
   unverified: boolean;
   /** Null when the transaction is not a batch. */
   batch: BatchAnalysis | null;
+  fingerprint: string;
 }
 
 const EXPECT_OPTIONS = [
@@ -56,8 +59,7 @@ async function planLifecycle(
 ): Promise<WritePlan<Disclosure> & { unverified: boolean }> {
   const address = ctx.resolveVault(input.vault);
   const hash = await resolveTxHash(ctx, address, input.hash);
-  const vault = ctx.qv.vault(address);
-  const tx = await vault.transaction(hash);
+  const tx = await transactionFromChain(ctx, address, hash);
 
   // Assertion flags: an agent that decides from prose is injection-vulnerable
   // by construction, so it binds to the bytes instead (plan §3.4).
@@ -71,6 +73,29 @@ async function planLifecycle(
 
   // Policy applies to non-interactive signing only; an attended human is bound
   // by the disclosure and the prompt, not by a file.
+  enforceLifecyclePolicy(ctx, tx, batch, action);
+
+  return {
+    disclosure: {
+      tx,
+      address,
+      action,
+      unverified,
+      batch,
+      fingerprint: transactionFingerprint(tx),
+    },
+    dataHash: keccak256(tx.data === '0x' ? '0x' : tx.data),
+    summary: `${action} ${safeText(tx.summary, 120)}`,
+    unverified,
+  };
+}
+
+function enforceLifecyclePolicy(
+  ctx: AppContext,
+  tx: VaultTransaction,
+  batch: BatchAnalysis | null,
+  action: string,
+): void {
   if (ctx.policy && (ctx.flags.yes || !ctx.interactive)) {
     const violations = checkPolicy(ctx.policy, {
       value: tx.value,
@@ -78,7 +103,9 @@ async function planLifecycle(
       kind: tx.kind,
       isDelegatecall: batch?.hasDelegatecall ?? false,
       abiSource: batch ? worstOf(tx.abiSource, batch.abiSource) : tx.abiSource,
-      approvalsLastHour: 0,
+      approvalsLastHour: recentPolicyActionCount(ctx.profileName, 'approve', ctx.now()),
+      countTowardApprovalLimit: action === 'approve',
+      effects: policyEffects(tx, batch),
     });
     if (violations.length) {
       throw new PreconditionError(
@@ -87,13 +114,61 @@ async function planLifecycle(
       );
     }
   }
+}
 
-  return {
-    disclosure: { tx, address, action, unverified, batch },
-    dataHash: keccak256(tx.data === '0x' ? '0x' : tx.data),
-    summary: `${action} ${safeText(tx.summary, 120)}`,
-    unverified,
+function policyEffects(
+  tx: VaultTransaction,
+  batch: BatchAnalysis | null,
+): { to: string; value: bigint; kind: string }[] {
+  const effect = (
+    fallbackTo: string,
+    value: bigint,
+    kind: string,
+    decoded?: VaultTransaction['decoded'],
+  ) => {
+    const recipient = decoded?.args.to;
+    return {
+      to: typeof recipient === 'string' ? recipient : fallbackTo,
+      value,
+      kind,
+    };
   };
+  if (!batch) return [effect(tx.to, tx.value, tx.kind, tx.decoded)];
+  return batch.calls.map((call) =>
+    effect(
+      call.to,
+      call.value,
+      call.decoded?.target === 'erc20'
+        ? 'erc20_transfer'
+        : call.decoded?.target === 'erc721'
+          ? 'erc721_transfer'
+          : call.decoded?.target === 'erc1155'
+            ? 'erc1155_transfer'
+            : call.value > 0n && call.data === '0x'
+              ? 'transfer'
+              : 'external_call',
+      call.decoded,
+    ),
+  );
+}
+
+/** Close the review/signing TOCTOU window and reapply every agent assertion. */
+async function revalidateLifecycle(
+  ctx: AppContext,
+  planned: WritePlan<Disclosure>,
+  input: LifecycleInput,
+): Promise<VaultTransaction> {
+  const d = planned.disclosure;
+  const fresh = await transactionFromChain(ctx, d.address, d.tx.hash);
+  if (transactionFingerprint(fresh) !== d.fingerprint) {
+    throw new PreconditionError(
+      'The transaction changed between review and signing.',
+      'Nothing was signed. Review the transaction again.',
+    );
+  }
+  assertExpectations(fresh, input);
+  enforceLifecyclePolicy(ctx, fresh, batchOf(fresh, ctx), d.action);
+  return fresh;
 }
 
 /**
@@ -275,9 +350,11 @@ export const txApproveCommand: CommandSpec<LifecycleInput, WriteResult, Disclosu
 
   plan: (ctx, input) => planLifecycle(ctx, input, 'approve'),
   renderPlan: renderPlanned,
+  planToJson: lifecyclePlanJson,
 
   async commit(ctx, planned, input) {
-    const { tx, address } = planned.disclosure;
+    const address = planned.disclosure.address;
+    const tx = await revalidateLifecycle(ctx, planned, input);
     const vault = ctx.qv.vault(address);
     const { address: signerAddress } = await ctx.requireSigner();
 
@@ -303,6 +380,16 @@ export const txApproveCommand: CommandSpec<LifecycleInput, WriteResult, Disclosu
         );
       }
       const result = await vault.approveAndExecute(tx.hash);
+      if (ctx.policy && (ctx.flags.yes || !ctx.interactive)) {
+        recordPolicyAction({
+          at: ctx.now(),
+          profile: ctx.profileName,
+          action: 'approve',
+          vault: address,
+          transactionHash: tx.hash,
+          chainTxHash: result.chainTxHash,
+        });
+      }
       return {
         data: {
           hash: tx.hash,
@@ -326,6 +413,16 @@ export const txApproveCommand: CommandSpec<LifecycleInput, WriteResult, Disclosu
     }
 
     const { chainTxHash } = await vault.approve(tx.hash);
+    if (ctx.policy && (ctx.flags.yes || !ctx.interactive)) {
+      recordPolicyAction({
+        at: ctx.now(),
+        profile: ctx.profileName,
+        action: 'approve',
+        vault: address,
+        transactionHash: tx.hash,
+        chainTxHash,
+      });
+    }
     // §4.1: an indexer stall after a successful write exits 0 — exiting
     // non-zero invites a retry of a multisig transaction that already
     // succeeded. But it must still be *said*, or the next `qv tx show`
@@ -339,7 +436,7 @@ export const txApproveCommand: CommandSpec<LifecycleInput, WriteResult, Disclosu
       changed: true,
       retryable: false,
       steps: [{ name: 'approve', status: 'ok', chainTxHash }],
-      next: [`qv tx show ${address} ${tx.hash.slice(0, 10)}`],
+      next: [`qv tx show ${address} ${tx.hash}`],
       warnings: reached ? undefined : ['The write landed on chain but the indexer has not caught up yet. `qv tx show` may lag by a few seconds; do not re-run this command.'],
     };
   },
@@ -370,8 +467,10 @@ export const txUnapproveCommand: CommandSpec<LifecycleInput, WriteResult, Disclo
   needs: { signer: true },
   plan: (ctx, input) => planLifecycle(ctx, input, 'withdraw approval from'),
   renderPlan: renderPlanned,
-  async commit(ctx, planned) {
-    const { tx, address } = planned.disclosure;
+  planToJson: lifecyclePlanJson,
+  async commit(ctx, planned, input) {
+    const address = planned.disclosure.address;
+    const tx = await revalidateLifecycle(ctx, planned, input);
     const { chainTxHash } = await ctx.qv.vault(address).revokeApproval(tx.hash);
     return {
       data: { hash: tx.hash, address, chainTxHash },
@@ -395,9 +494,11 @@ export const txExecuteCommand: CommandSpec<LifecycleInput, WriteResult, Disclosu
   needs: { signer: true },
   plan: (ctx, input) => planLifecycle(ctx, input, 'execute'),
   renderPlan: renderPlanned,
+  planToJson: lifecyclePlanJson,
 
-  async commit(ctx, planned) {
-    const { tx, address } = planned.disclosure;
+  async commit(ctx, planned, input) {
+    const address = planned.disclosure.address;
+    const tx = await revalidateLifecycle(ctx, planned, input);
     const vault = ctx.qv.vault(address);
     const result = await vault.execute(tx.hash);
 
@@ -456,16 +557,18 @@ export const txCancelCommand: CommandSpec<LifecycleInput, WriteResult, Disclosur
   needs: { signer: true },
   plan: (ctx, input) => planLifecycle(ctx, input, 'cancel'),
   renderPlan: renderPlanned,
+  planToJson: lifecyclePlanJson,
 
-  async commit(ctx, planned) {
-    const { tx, address } = planned.disclosure;
+  async commit(ctx, planned, input) {
+    const address = planned.disclosure.address;
+    const tx = await revalidateLifecycle(ctx, planned, input);
     // Past quorum this is a different operation entirely — a new proposal
     // needing its own approval round. Never silently escalate one into the
     // other.
     if (tx.approvedAt > 0) {
       throw new PreconditionError(
         'This transaction has reached quorum, so proposer-cancel is permanently blocked.',
-        `Cancelling now needs owner consensus: qv propose cancel-by-consensus ${address} ${tx.hash.slice(0, 10)}`,
+        `Cancelling now needs owner consensus: qv propose cancel-by-consensus ${address} ${tx.hash}`,
       );
     }
     const { chainTxHash } = await ctx.qv.vault(address).cancel(tx.hash);
@@ -491,8 +594,10 @@ export const txExpireCommand: CommandSpec<LifecycleInput, WriteResult, Disclosur
   needs: { signer: true },
   plan: (ctx, input) => planLifecycle(ctx, input, 'expire'),
   renderPlan: renderPlanned,
-  async commit(ctx, planned) {
-    const { tx, address } = planned.disclosure;
+  planToJson: lifecyclePlanJson,
+  async commit(ctx, planned, input) {
+    const address = planned.disclosure.address;
+    const tx = await revalidateLifecycle(ctx, planned, input);
     const { chainTxHash } = await ctx.qv.vault(address).expire(tx.hash);
     return {
       data: { hash: tx.hash, address, chainTxHash },
@@ -504,5 +609,33 @@ export const txExpireCommand: CommandSpec<LifecycleInput, WriteResult, Disclosur
   toJson: (r) => baseWriteJson(r) as never,
   outputSchema: writeSchema,
 };
+
+function lifecyclePlanJson(planned: WritePlan<Disclosure>) {
+  const { tx, address, action, unverified, batch } = planned.disclosure;
+  return {
+    action,
+    vault: address,
+    transactionHash: tx.hash,
+    to: tx.to,
+    value: tx.value.toString(10),
+    data: tx.data,
+    dataHash: planned.dataHash ?? null,
+    abiSource: tx.abiSource,
+    unverified,
+    batch: batch
+      ? {
+          unreadable: batch.error ?? null,
+          hasDelegatecall: batch.hasDelegatecall,
+          calls: batch.calls.map((call) => ({
+            operation: call.operation,
+            to: call.to,
+            value: call.value.toString(10),
+            data: call.data,
+            abiSource: call.abiSource,
+          })),
+        }
+      : null,
+  };
+}
 
 export { outcomeExit, planLifecycle, assertExpectations };

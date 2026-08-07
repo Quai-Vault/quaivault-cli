@@ -12,7 +12,10 @@ import { commandId } from './spec.js';
  * Deliberately static and content-free: it never enumerates configured
  * aliases, contacts, profiles or keystore paths.
  */
-export function buildSchema(cliVersion: string): JsonValue {
+export function buildSchema(cliVersion: string, requestedVersion = SCHEMA_VERSION): JsonValue {
+  if (requestedVersion !== SCHEMA_VERSION) {
+    throw new Error(`Unsupported schema version ${requestedVersion}; supported: ${SCHEMA_VERSION}.`);
+  }
   return {
     schema: SCHEMA_VERSION,
     cliVersion,
@@ -62,7 +65,36 @@ export function buildSchema(cliVersion: string): JsonValue {
         'DECLINED',
         'UNKNOWN',
       ],
+      exitAndRetry: {
+        VALIDATION: { exitCode: ExitCode.Usage, retryable: false },
+        CONFIG: { exitCode: ExitCode.Usage, retryable: false },
+        PRECONDITION: { exitCode: ExitCode.Precondition, retryable: false },
+        POLICY: { exitCode: ExitCode.Precondition, retryable: false },
+        NO_SIGNER: { exitCode: ExitCode.Precondition, retryable: false },
+        NO_INDEXER: { exitCode: ExitCode.Precondition, retryable: true },
+        INDEXER_QUERY: { exitCode: ExitCode.Failure, retryable: true },
+        ABORTED: { exitCode: ExitCode.Interrupted, retryable: true },
+        UNKNOWN: { exitCode: ExitCode.Failure, retryable: false },
+      },
     },
+    globalOptions: [
+      { flags: '--json', description: 'one JSON envelope; implies --no-input, not --yes' },
+      { flags: '-y, --yes', description: 'authorize a non-interactive write subject to policy' },
+      { flags: '--no-input', description: 'never prompt' },
+      { flags: '-q, --quiet', description: 'suppress human hints' },
+      { flags: '--debug', description: 'include diagnostic stacks on human errors' },
+      { flags: '--wide', description: 'disable human-output truncation' },
+      { flags: '--color <mode>', choices: ['auto', 'always', 'never'] },
+      { flags: '-p, --profile <name>' },
+      { flags: '--vault <alias|address>' },
+      { flags: '--as <address>' },
+      { flags: '--dry-run', description: 'return a machine-safe preview without signing' },
+      { flags: '--i-understand-unverified', description: 'explicitly acknowledge unverified calldata' },
+    ],
+    metaCommands: [
+      { command: '--schema', usage: 'qv --schema [--schema-version 1]' },
+      { command: 'completion', usage: 'qv completion <bash|zsh|fish>' },
+    ],
     notes: [
       'Proposal age is approximate, derived from a block delta. --json never emits a prose age: it emits proposedAtBlock, chainHead and proposedAtApproximate so the consumer does its own arithmetic.',
       'total on paged results is an estimate. hasMore is exact — branch on hasMore.',
@@ -83,6 +115,11 @@ export function buildSchema(cliVersion: string): JsonValue {
         choices: o.choices ? [...o.choices] : undefined,
         default: o.defaultValue ?? undefined,
       })),
+      input: {
+        requiredArguments: (spec.args ?? []).filter((arg) => arg.required).map((arg) => arg.name),
+        positionalArguments: (spec.args ?? []).map((arg) => arg.name),
+        optionFlags: (spec.options ?? []).map((option) => option.flags),
+      },
       needs: {
         signer: spec.needs?.signer === true,
         identity: spec.needs?.identity === true,

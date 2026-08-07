@@ -16,6 +16,7 @@ import {
 } from './reducer.js';
 import {
   ActivityPane,
+  AssetsPane,
   DetailPane,
   HistoryPane,
   InboxPane,
@@ -59,6 +60,7 @@ const PANE_LABEL: Record<Pane, string> = {
   inbox: 'inbox',
   history: 'history',
   activity: 'activity',
+  assets: 'assets',
   vault: 'vault',
   recovery: 'recovery',
   policy: 'policy',
@@ -216,8 +218,8 @@ export function App({
       }
     }
 
-    if (state.pane === 'propose' && mapped === 'return' && state.form.field >= 0 && vault) {
-      const argv = formArgv(state.form, vault.address);
+    if (state.pane === 'propose' && mapped === 'return' && state.form.field >= 0) {
+      const argv = formArgv(state.form, vault?.address ?? '');
       if (argv) {
         spawn(argv, 'propose', '');
         return;
@@ -234,6 +236,18 @@ export function App({
         spawn(['tx', 'execute', row.vault, row.tx.hash], 'execute', row.tx.hash);
         return;
       }
+      if (mapped === 'u' && can('revokeApproval')) {
+        spawn(['tx', 'unapprove', row.vault, row.tx.hash], 'unapprove', row.tx.hash);
+        return;
+      }
+      if (mapped === 'c' && can('cancel')) {
+        spawn(['tx', 'cancel', row.vault, row.tx.hash], 'cancel', row.tx.hash);
+        return;
+      }
+      if (mapped === 'e' && can('expire')) {
+        spawn(['tx', 'expire', row.vault, row.tx.hash], 'expire', row.tx.hash);
+        return;
+      }
     }
 
     /**
@@ -247,16 +261,26 @@ export function App({
      */
     if (state.pane === 'recovery' && state.recovery && vault && !state.detail) {
       const hash = state.recovery.hash;
-      if (mapped === 'c') {
+      const can = (action: string): boolean =>
+        state.recovery?.affordances?.some((item) => item.action === action && item.allowed) === true;
+      if (mapped === 'c' && can('cancel')) {
         spawn(['recovery', 'cancel', vault.address, hash], 'recovery cancel', hash);
         return;
       }
-      if (mapped === 'a') {
+      if (mapped === 'a' && can('approve')) {
         spawn(['recovery', 'approve', vault.address, hash], 'recovery approve', hash);
         return;
       }
-      if (mapped === 'x') {
+      if (mapped === 'x' && can('execute')) {
         spawn(['recovery', 'execute', vault.address, hash], 'recovery execute', hash);
+        return;
+      }
+      if (mapped === 'u' && can('revokeApproval')) {
+        spawn(['recovery', 'unapprove', vault.address, hash], 'recovery unapprove', hash);
+        return;
+      }
+      if (mapped === 'e' && can('expire')) {
+        spawn(['recovery', 'expire', vault.address, hash], 'recovery expire', hash);
         return;
       }
     }
@@ -326,6 +350,9 @@ function Header({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactEl
       {state.load.status === 'degraded' ? (
         <Text color="red"> · indexer unavailable — lists are incomplete, not empty</Text>
       ) : null}
+      {state.load.status === 'error' ? (
+        <Text color="red"> · refresh failed: {safeText(state.load.error ?? 'unknown error', 120)}</Text>
+      ) : null}
       {alarm ? (
         <Text color="red" bold>
           {'  ⚠ RECOVERY PENDING'}
@@ -378,6 +405,8 @@ function Body({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElem
       return <HistoryPane state={state} env={env} />;
     case 'activity':
       return <ActivityPane state={state} env={env} />;
+    case 'assets':
+      return <AssetsPane state={state} env={env} />;
     case 'vault':
       return <VaultPane state={state} env={env} />;
     case 'recovery':
@@ -396,14 +425,37 @@ function Body({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElem
 /** The key legend, scoped to what the current pane can actually do. */
 function keyLegend(state: TuiState): string {
   const vaults = state.vaults.length > 1 ? ' · [/] vault' : '';
-  if (state.detail) return 'a approve · x execute · q back';
+  if (state.detail) {
+    const row = selectedRow(state);
+    const allowed = new Set(
+      row?.affordances.filter((item) => item.allowed).map((item) => item.action),
+    );
+    const actions = [
+      allowed.has('approve') ? 'a approve' : '',
+      allowed.has('revokeApproval') ? 'u unapprove' : '',
+      allowed.has('execute') ? 'x execute' : '',
+      allowed.has('cancel') ? 'c cancel' : '',
+      allowed.has('expire') ? 'e expire' : '',
+    ].filter(Boolean);
+    return `${actions.join(' · ')}${actions.length ? ' · ' : ''}q back`;
+  }
   if (state.pane === 'policy') {
     if (state.policyEdit !== null) return 'type to edit · enter apply · ctrl-u clear · esc cancel';
     return `j/k field · e edit · tab pane${vaults} · r refresh · q quit`;
   }
   if (state.pane === 'propose') return 'tab field · ←/→ kind · enter build · esc leave';
   if (state.pane === 'recovery' && state.recovery) {
-    return `c cancel · a approve · x execute · tab pane${vaults} · r refresh · q quit`;
+    const allowed = new Set(
+      (state.recovery.affordances ?? []).filter((item) => item.allowed).map((item) => item.action),
+    );
+    const actions = [
+      allowed.has('cancel') ? 'c cancel' : '',
+      allowed.has('approve') ? 'a approve' : '',
+      allowed.has('revokeApproval') ? 'u unapprove' : '',
+      allowed.has('execute') ? 'x execute' : '',
+      allowed.has('expire') ? 'e expire' : '',
+    ].filter(Boolean).join(' · ');
+    return `${actions}${actions ? ' · ' : ''}tab pane${vaults} · r refresh · q quit`;
   }
   return `tab pane · j/k move · enter open${vaults} · r refresh · q quit`;
 }
