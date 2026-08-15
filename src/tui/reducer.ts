@@ -96,6 +96,17 @@ export interface RecoveryDetail {
   additional?: number;
 }
 
+/** Configuration and enablement are independent of a pending recovery. */
+export interface RecoveryModuleDetail {
+  /** Null when this network/profile has no SocialRecoveryModule deployment configured. */
+  address: string | null;
+  enabled: boolean;
+  configured: boolean;
+  guardians: string[];
+  threshold: number;
+  recoveryPeriod: number;
+}
+
 /** One line of the change feed. Topic and type only — never a raw row (§8 R10). */
 export interface ActivityEntry {
   at: number;
@@ -272,6 +283,7 @@ export interface TuiState {
   history: TuiRow[];
   activity: ActivityEntry[];
   vaultDetail: VaultDetail | null;
+  recoveryModule: RecoveryModuleDetail | null;
   recovery: RecoveryDetail | null;
   /** Null means no policy file exists, which is not the same as an empty one. */
   policy: PolicyLine[] | null;
@@ -299,7 +311,9 @@ export type TuiEvent =
   | { type: 'vaults'; vaults: VaultSummary[] }
   | { type: 'history'; rows: TuiRow[] }
   | { type: 'vault-detail'; detail: VaultDetail | null }
+  | { type: 'recovery-module'; detail: RecoveryModuleDetail | null }
   | { type: 'recovery'; detail: RecoveryDetail | null }
+  | { type: 'open-form'; kind: ProposeKind }
   | { type: 'policy'; lines: PolicyLine[] | null }
   | { type: 'policy-edit'; value: string | null }
   | { type: 'activity'; entry: ActivityEntry }
@@ -342,6 +356,7 @@ export function initialState(viewport = 10): TuiState {
     history: [],
     activity: [],
     vaultDetail: null,
+    recoveryModule: null,
     recovery: null,
     policy: null,
     policyField: 0,
@@ -443,8 +458,21 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
     case 'vault-detail':
       return { ...state, vaultDetail: event.detail };
 
+    case 'recovery-module':
+      return { ...state, recoveryModule: event.detail };
+
     case 'recovery':
       return { ...state, recovery: event.detail };
+
+    case 'open-form':
+      return {
+        ...state,
+        pane: 'propose',
+        detail: false,
+        selected: 0,
+        scroll: 0,
+        form: { ...initialForm(event.kind), field: 0 },
+      };
 
     case 'policy':
       return {
@@ -527,6 +555,7 @@ function selectVault(state: TuiState, direction: 1 | -1): TuiState {
     scroll: state.pane === 'inbox' ? state.scroll : 0,
     history: [],
     vaultDetail: null,
+    recoveryModule: null,
     recovery: null,
   });
 }

@@ -18,6 +18,7 @@ import type { Io } from '../render/io.js';
 
 interface RecoveryStatusData {
   address: string;
+  moduleAddress: string | null;
   config: RecoveryConfig | null;
   pending: RecoveryRequest[];
   enabled: boolean;
@@ -26,7 +27,7 @@ interface RecoveryStatusData {
 export const recoveryStatusCommand: CommandSpec<{ vault?: string }, RecoveryStatusData> = {
   path: ['recovery', 'status'],
   key: (input) => cacheKey(['recovery', 'status'], input.vault),
-  invalidatedBy: ['recoveries'],
+  invalidatedBy: ['modules', 'recoveries'],
   scopeVault: (input) => input.vault,
   describe: 'Guardian configuration and any pending recovery',
   args: [{ name: 'vault', description: 'vault alias or address' }],
@@ -34,27 +35,61 @@ export const recoveryStatusCommand: CommandSpec<{ vault?: string }, RecoveryStat
   async run(ctx, input) {
     const address = ctx.resolveVault(input.vault);
     const recovery = ctx.qv.vault(address).recovery;
-    const enabled = await recovery.isEnabled();
-    const [config, pending] = await Promise.all([
-      enabled ? recovery.config() : Promise.resolve(null),
-      enabled ? recovery.pending() : Promise.resolve([]),
+    const moduleAddress = ctx.qv.config.contracts.socialRecovery ?? null;
+    if (!moduleAddress) {
+      return {
+        data: { address, moduleAddress, config: null, pending: [], enabled: false },
+        changed: false,
+        warnings: ['No SocialRecoveryModule deployment is configured for this network.'],
+      };
+    }
+    const [enabled, config, pending] = await Promise.all([
+      recovery.isEnabled(),
+      recovery.config(),
+      recovery.pending(),
     ]);
-    return { data: { address, config, pending, enabled }, changed: false };
+    const next = !enabled
+      ? [`qv propose enable-recovery ${address}`]
+      : !config.configured
+        ? [
+            `qv propose setup-recovery ${address} --guardian <address...> --threshold <n> --recovery-period <duration>`,
+          ]
+        : undefined;
+    return {
+      data: { address, moduleAddress, config, pending, enabled },
+      changed: false,
+      ...(next ? { next } : {}),
+    };
   },
 
   render(result, io, ctx) {
-    const { config, pending, enabled } = result.data;
-    if (!enabled) {
-      io.out('  Social recovery is not enabled on this vault.');
+    const { config, pending, enabled, moduleAddress } = result.data;
+    if (!moduleAddress) {
+      io.out('  No SocialRecoveryModule deployment is configured for this network.');
+      io.out('  Check the active profile/network or QUAIVAULT_SOCIAL_RECOVERY_MODULE.');
       return;
     }
-    if (config) {
+    io.out(`  Module       ${moduleAddress}`);
+    io.out(`  Status       ${enabled ? 'enabled' : 'disabled'}`);
+    if (!enabled) {
+      io.out('');
+      io.out('  Enable it through the normal owner proposal and quorum flow:');
+      io.out(`    qv propose enable-recovery ${result.data.address}`);
+    }
+    if (config?.configured) {
+      io.out('');
       io.out(`  Guardians    ${config.threshold} of ${config.guardians.length}`);
       for (const g of config.guardians) {
         const name = ctx.contactName(g);
         io.out(`    ${g}${name ? `   ${safeText(name, 40)}` : ''}`);
       }
       io.out(`  Period       ${formatDuration(config.recoveryPeriod)}`);
+    } else if (enabled) {
+      io.out('');
+      io.out('  No guardian configuration is set. Configure it through an owner proposal:');
+      io.out(
+        `    qv propose setup-recovery ${result.data.address} --guardian <address...> --threshold <n> --recovery-period <duration>`,
+      );
     }
     if (!pending.length) {
       io.out('');
@@ -80,12 +115,15 @@ export const recoveryStatusCommand: CommandSpec<{ vault?: string }, RecoveryStat
 
   toJson: (r) => ({
     vault: r.data.address,
+    moduleAddress: r.data.moduleAddress,
     enabled: r.data.enabled,
+    configured: r.data.config?.configured ?? false,
     config: r.data.config
       ? {
           guardians: r.data.config.guardians,
           threshold: r.data.config.threshold,
           recoveryPeriod: r.data.config.recoveryPeriod,
+          configured: r.data.config.configured,
         }
       : null,
     pending: r.data.pending.map((p) => ({
@@ -104,7 +142,9 @@ export const recoveryStatusCommand: CommandSpec<{ vault?: string }, RecoveryStat
     type: 'object',
     properties: {
       vault: { type: 'string' },
+      moduleAddress: { type: ['string', 'null'] },
       enabled: { type: 'boolean' },
+      configured: { type: 'boolean' },
       config: { type: ['object', 'null'] },
       pending: { type: 'array' },
     },

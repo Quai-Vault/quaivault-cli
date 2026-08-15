@@ -259,6 +259,37 @@ export function App({
      * `c` stays first in the footer: cancelling is the defensive action, and
      * the one a compromised-key holder needs to reach fastest.
      */
+    if (state.pane === 'recovery' && vault && !state.detail && mapped === 's') {
+      if (state.recoveryModule?.address && !state.recoveryModule.enabled) {
+        spawn(
+          ['propose', 'enable-recovery', vault.address],
+          'enable social recovery',
+          state.recoveryModule.address,
+        );
+        return;
+      }
+      if (state.recoveryModule?.address && state.recoveryModule.enabled) {
+        dispatch({ type: 'open-form', kind: 'setup-recovery' });
+        return;
+      }
+    }
+
+    if (
+      state.pane === 'recovery' &&
+      vault &&
+      !state.detail &&
+      mapped === 'd' &&
+      state.recoveryModule?.address &&
+      state.recoveryModule.enabled
+    ) {
+      spawn(
+        ['propose', 'disable-recovery', vault.address],
+        'disable social recovery',
+        state.recoveryModule.address,
+      );
+      return;
+    }
+
     if (state.pane === 'recovery' && state.recovery && vault && !state.detail) {
       const hash = state.recovery.hash;
       const can = (action: string): boolean =>
@@ -444,11 +475,14 @@ function keyLegend(state: TuiState): string {
     return `j/k field · e edit · tab pane${vaults} · r refresh · q quit`;
   }
   if (state.pane === 'propose') return 'tab field · ←/→ kind · enter build · esc leave';
-  if (state.pane === 'recovery' && state.recovery) {
+  if (state.pane === 'recovery') {
     const allowed = new Set(
-      (state.recovery.affordances ?? []).filter((item) => item.allowed).map((item) => item.action),
+      (state.recovery?.affordances ?? []).filter((item) => item.allowed).map((item) => item.action),
     );
     const actions = [
+      state.recoveryModule?.address && !state.recoveryModule.enabled ? 's enable' : '',
+      state.recoveryModule?.address && state.recoveryModule.enabled ? 's configure' : '',
+      state.recoveryModule?.address && state.recoveryModule.enabled ? 'd disable' : '',
       allowed.has('cancel') ? 'c cancel' : '',
       allowed.has('approve') ? 'a approve' : '',
       allowed.has('revokeApproval') ? 'u unapprove' : '',

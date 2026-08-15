@@ -23,7 +23,7 @@ This is the current product contract. `PLAN.md` remains the architectural design
 | Atomic batches | `propose batch --request` | batch request form |
 | Owner/threshold/timelock/module/delegatecall administration | `propose *` | proposal forms |
 | EIP-1271 sign/unsign | `propose sign-message [--unsign]` | proposal form |
-| Social recovery setup | `propose setup-recovery` | proposal form |
+| Social recovery module detail/enable/disable/setup | `recovery status`, `propose enable-recovery`, `propose disable-recovery`, `propose setup-recovery` | module/config detail plus contextual enable/disable/setup flow |
 | Recovery initiate/approve/unapprove/execute/cancel/expire | `recovery *` | initiate form and contextual actions |
 | Native/token/NFT holdings | `balance --nfts` | assets pane |
 | Transaction/recovery/deposit/token-transfer history | `tx history`, `recovery history`, `activity *` | history and activity panes |

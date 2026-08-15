@@ -10,6 +10,7 @@ import type { TuiEnv } from '../tui/env.js';
 import type {
   PolicyLine,
   RecoveryDetail,
+  RecoveryModuleDetail,
   TuiEvent,
   TuiRow,
   VaultSummary,
@@ -112,8 +113,8 @@ interface PendingRecoveryRow {
  * Load the panes that describe **one** vault: detail, recovery and history.
  *
  * Split out of `refresh` so switching the vault cursor does not re-read every
- * vault's pending set just to repaint three panes. Both callers dispatch the
- * same three events, so a switch and a refresh leave the UI in the same shape.
+ * vault's pending set just to repaint the scoped panes. Both callers dispatch
+ * the same events, so a switch and a refresh leave the UI in the same shape.
  */
 async function loadVaultScoped(
   ctx: AppContext,
@@ -122,12 +123,21 @@ async function loadVaultScoped(
   identity: string,
 ): Promise<void> {
   const vault = ctx.qv.vault(address);
-  const [info, modules, balances, historyPage, pendingRecovery, health] = await Promise.all([
+  const moduleAddress = ctx.qv.config.contracts.socialRecovery ?? null;
+  const recoveryReads = moduleAddress
+    ? Promise.all([
+        vault.recovery.isEnabled(),
+        vault.recovery.config(),
+        vault.recovery.pending(),
+      ] as const).then(([enabled, config, pending]) => ({ enabled, config, pending }))
+    : Promise.resolve({ enabled: false, config: null, pending: [] as PendingRecoveryRow[] });
+
+  const [info, modules, balances, historyPage, recoveryState, health] = await Promise.all([
     vault.info(),
     vault.modules(),
     vault.balances({ verify: false }),
     vault.transactionHistory({ limit: 50 }),
-    vault.recovery.pending(),
+    recoveryReads,
     ctx.qv.indexerHealth(),
   ]);
 
@@ -143,7 +153,18 @@ async function loadVaultScoped(
     },
   });
 
-  const first = (pendingRecovery as PendingRecoveryRow[])[0];
+  const recoveryModule: RecoveryModuleDetail = {
+    address: moduleAddress,
+    enabled: recoveryState.enabled,
+    configured: recoveryState.config?.configured ?? false,
+    guardians: recoveryState.config?.guardians ?? [],
+    threshold: recoveryState.config?.threshold ?? 0,
+    recoveryPeriod: recoveryState.config?.recoveryPeriod ?? 0,
+  };
+  dispatch({ type: 'recovery-module', detail: recoveryModule });
+
+  const pendingRecovery = recoveryState.pending as PendingRecoveryRow[];
+  const first = pendingRecovery[0];
   const recoveryAffordances = first
     ? await vault.recovery.affordances(first.hash, identity)
     : [];
@@ -268,7 +289,7 @@ function subscribe(
             });
             onChange();
           },
-          { topics: ['transactions', 'confirmations', 'owners', 'recoveries'] },
+          { topics: ['transactions', 'confirmations', 'owners', 'modules', 'recoveries'] },
         ),
       );
     } catch {

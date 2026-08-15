@@ -689,6 +689,61 @@ export const proposeCallCommand = makeProposeCommand<
   },
 });
 
+function configuredRecoveryModule(ctx: AppContext): string {
+  const configured = ctx.qv.config.contracts.socialRecovery;
+  if (!configured) {
+    throw new PreconditionError(
+      'No SocialRecoveryModule deployment is configured for this network.',
+      'Check the active profile/network or configure QUAIVAULT_SOCIAL_RECOVERY_MODULE.',
+    );
+  }
+  return assertRecipient(configured, 'SocialRecoveryModule');
+}
+
+export const proposeEnableRecoveryCommand = makeProposeCommand<ProposeCommon>({
+  path: ['propose', 'enable-recovery'],
+  describe: 'Propose enabling the configured SocialRecoveryModule',
+  action: 'enable social recovery',
+  build: async (ctx, vault, _input, timing) => {
+    const module = configuredRecoveryModule(ctx);
+    if (await vault.isModuleEnabled(module)) {
+      throw new PreconditionError(
+        'Social recovery is already enabled on this vault.',
+        'Configure or update its guardians with qv propose setup-recovery.',
+      );
+    }
+    return {
+      detail: [
+        `Configured recovery module: ${module}`,
+        'Enabling it grants the deployed SocialRecoveryModule authority to replace the owner set after guardian quorum and the recovery delay.',
+      ],
+      call: (dryRun: boolean) => vault.propose.enableModule(module, { ...timing, dryRun }),
+    };
+  },
+});
+
+export const proposeDisableRecoveryCommand = makeProposeCommand<ProposeCommon>({
+  path: ['propose', 'disable-recovery'],
+  describe: 'Propose disabling the configured SocialRecoveryModule',
+  action: 'disable social recovery',
+  build: async (ctx, vault, _input, timing) => {
+    const module = configuredRecoveryModule(ctx);
+    if (!(await vault.isModuleEnabled(module))) {
+      throw new PreconditionError(
+        'Social recovery is already disabled on this vault.',
+        'Enable it with qv propose enable-recovery if recovery protection is required.',
+      );
+    }
+    return {
+      detail: [
+        `Configured recovery module: ${module}`,
+        'Disabling it makes the saved guardian configuration inactive and prevents pending recoveries from executing until the module is enabled again.',
+      ],
+      call: (dryRun: boolean) => vault.propose.disableModule(module, { ...timing, dryRun }),
+    };
+  },
+});
+
 export const proposeSetupRecoveryCommand = makeProposeCommand<
   ProposeCommon & { guardian?: string[]; threshold: string; recoveryPeriod: string }
 >({
@@ -700,7 +755,14 @@ export const proposeSetupRecoveryCommand = makeProposeCommand<
     { flags: '--recovery-period <duration>', description: 'delay before execution, e.g. 7d' },
   ],
   action: 'configure social recovery',
-  build: (_ctx, vault, input, timing) => {
+  build: async (ctx, vault, input, timing) => {
+    const module = configuredRecoveryModule(ctx);
+    if (!(await vault.isModuleEnabled(module))) {
+      throw new PreconditionError(
+        'Social recovery is not enabled on this vault.',
+        `First propose and execute: qv propose enable-recovery ${input.vault ?? '<vault>'}`,
+      );
+    }
     const guardians = (Array.isArray(input.guardian) ? input.guardian : input.guardian ? [input.guardian] : [])
       .map((guardian) => assertRecipient(guardian, 'guardian'));
     if (!guardians.length) throw new UsageError('At least one --guardian is required.');
@@ -712,7 +774,7 @@ export const proposeSetupRecoveryCommand = makeProposeCommand<
       throw new UsageError(`--threshold must be between 1 and ${guardians.length}.`);
     }
     const recoveryPeriodSeconds = parseDuration(requireFlag(input.recoveryPeriod, '--recovery-period'));
-    return Promise.resolve({
+    return {
       detail: [
         `Guardians: ${threshold} of ${guardians.length}`,
         ...guardians.map((guardian) => `  ${guardian}`),
@@ -720,7 +782,7 @@ export const proposeSetupRecoveryCommand = makeProposeCommand<
       ],
       call: (dryRun: boolean) =>
         vault.propose.setupRecovery({ guardians, threshold, recoveryPeriodSeconds, ...timing, dryRun }),
-    });
+    };
   },
 });
 
@@ -968,6 +1030,8 @@ export const PROPOSE_COMMANDS = [
   proposeErc1155Command,
   proposeBatchCommand,
   proposeCallCommand,
+  proposeEnableRecoveryCommand,
+  proposeDisableRecoveryCommand,
   proposeSetupRecoveryCommand,
   proposeAddOwnerCommand,
   proposeRemoveOwnerCommand,

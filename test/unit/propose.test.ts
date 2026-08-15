@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { MAX_EXECUTION_DELAY, minimumExpiration } from '@quaivault/sdk';
-import { parseDuration, proposeTransferCommand } from '../../src/commands/propose.js';
+import {
+  parseDuration,
+  proposeDisableRecoveryCommand,
+  proposeEnableRecoveryCommand,
+  proposeSetupRecoveryCommand,
+  proposeTransferCommand,
+} from '../../src/commands/propose.js';
 import { ADDR, createFakeClient, createFakeContext, fakeVaultInfo } from '../fake-client.js';
 
 const abort = new AbortController().signal;
@@ -132,5 +138,104 @@ describe('proposal agent policy', () => {
         abort,
       ),
     ).rejects.toThrow(/Refused by policy/);
+  });
+});
+
+describe('social recovery module proposals', () => {
+  it('enables only the module configured for the active network', async () => {
+    const ctx = createFakeContext({ identity: ADDR.alice, now: NOW });
+    const planned = await proposeEnableRecoveryCommand.plan!(
+      ctx,
+      { vault: ADDR.vault },
+      abort,
+    );
+
+    expect(planned.disclosure.detail.join('\n')).toContain(
+      ctx.qv.config.contracts.socialRecovery,
+    );
+    expect(planned.disclosure.abiSource).toBe('builtin');
+    expect(planned.disclosure.unverified).toBe(false);
+  });
+
+  it('does not create a duplicate enable proposal', async () => {
+    const ctx = createFakeContext({
+      client: createFakeClient({
+        vaults: { [ADDR.vault]: { recoveryEnabled: true } },
+      }),
+      identity: ADDR.alice,
+      now: NOW,
+    });
+    await expect(
+      proposeEnableRecoveryCommand.plan!(ctx, { vault: ADDR.vault }, abort),
+    ).rejects.toThrow(/already enabled/);
+  });
+
+  it('builds a verified disable proposal for that same configured module', async () => {
+    const ctx = createFakeContext({
+      client: createFakeClient({
+        vaults: { [ADDR.vault]: { recoveryEnabled: true } },
+      }),
+      identity: ADDR.alice,
+      now: NOW,
+    });
+    const planned = await proposeDisableRecoveryCommand.plan!(
+      ctx,
+      { vault: ADDR.vault },
+      abort,
+    );
+    expect(planned.disclosure.detail.join('\n')).toContain(
+      ctx.qv.config.contracts.socialRecovery,
+    );
+    expect(planned.disclosure.abiSource).toBe('builtin');
+    expect(planned.disclosure.unverified).toBe(false);
+  });
+
+  it('does not create a duplicate disable proposal', async () => {
+    const ctx = createFakeContext({ identity: ADDR.alice, now: NOW });
+    await expect(
+      proposeDisableRecoveryCommand.plan!(ctx, { vault: ADDR.vault }, abort),
+    ).rejects.toThrow(/already disabled/);
+  });
+
+  it('requires enablement before proposing guardian configuration', async () => {
+    const ctx = createFakeContext({ identity: ADDR.alice, now: NOW });
+    await expect(
+      proposeSetupRecoveryCommand.plan!(
+        ctx,
+        {
+          vault: ADDR.vault,
+          guardian: [ADDR.carol],
+          threshold: '1',
+          recoveryPeriod: '7d',
+        },
+        abort,
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/not enabled/),
+      remediation: expect.stringContaining('qv propose enable-recovery'),
+    });
+  });
+
+  it('builds a verified setup proposal once the module is enabled', async () => {
+    const ctx = createFakeContext({
+      client: createFakeClient({
+        vaults: { [ADDR.vault]: { recoveryEnabled: true } },
+      }),
+      identity: ADDR.alice,
+      now: NOW,
+    });
+    const planned = await proposeSetupRecoveryCommand.plan!(
+      ctx,
+      {
+        vault: ADDR.vault,
+        guardian: [ADDR.carol],
+        threshold: '1',
+        recoveryPeriod: '7d',
+      },
+      abort,
+    );
+    expect(planned.disclosure.abiSource).toBe('builtin');
+    expect(planned.disclosure.unverified).toBe(false);
+    expect(planned.disclosure.detail.join('\n')).toContain('1 of 1');
   });
 });

@@ -1,4 +1,10 @@
-import { mainnet, interfaces } from '@quaivault/sdk';
+import {
+  mainnet,
+  interfaces,
+  recoveryCall,
+  selfCall,
+  SENTINEL_MODULES,
+} from '@quaivault/sdk';
 import { ResultStore } from '../src/store/index.js';
 import type {
   Affordance,
@@ -7,6 +13,7 @@ import type {
   VaultInfo,
   VaultTransaction,
   Page,
+  RecoveryConfig,
 } from '@quaivault/sdk';
 import type { AppContext, GlobalFlags } from '../src/context/context.js';
 import { createBufferIo } from '../src/render/io.js';
@@ -28,6 +35,8 @@ export interface FakeVaultState {
   history: VaultTransaction[];
   affordances: Record<string, Affordance[]>;
   hasPendingRecovery: boolean;
+  recoveryEnabled: boolean;
+  recoveryConfig: RecoveryConfig;
   /** What the acting identity may do to the pending recovery. */
   recoveryAffordances: { action: string; allowed: boolean; reason: string }[];
 }
@@ -115,6 +124,8 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
       history: [],
       affordances: {},
       hasPendingRecovery: false,
+      recoveryEnabled: false,
+      recoveryConfig: { guardians: [], threshold: 0, recoveryPeriod: 0, configured: false },
       recoveryAffordances: [],
       ...over,
     };
@@ -124,7 +135,17 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
     const st = stateFor(address);
     return {
       info: () => Promise.resolve(st.info),
-      modules: () => Promise.resolve([]),
+      modules: () =>
+        Promise.resolve(
+          st.recoveryEnabled && mainnet.contracts.socialRecovery
+            ? [mainnet.contracts.socialRecovery]
+            : [],
+        ),
+      isModuleEnabled: (module: string) =>
+        Promise.resolve(
+          st.recoveryEnabled &&
+            module.toLowerCase() === mainnet.contracts.socialRecovery?.toLowerCase(),
+        ),
       pendingTransactions: () => Promise.resolve(st.pending),
       transactionHistory: () => Promise.resolve(page(st.history)),
       transaction: (hash: string) => {
@@ -157,8 +178,82 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
                   data: '0x',
                 },
           ),
+        enableModule: (module: string, params: { dryRun?: boolean }) =>
+          Promise.resolve(
+            params.dryRun
+              ? {
+                  dryRun: true as const,
+                  to: address,
+                  value: 0n,
+                  data: selfCall.enableModule(module),
+                  gasEstimate: 100_000n,
+                  description: 'enable module',
+                }
+              : {
+                  txHash: `0x${'cc'.repeat(32)}`,
+                  chainTxHash: `0x${'dd'.repeat(32)}`,
+                  to: address,
+                  value: 0n,
+                  data: selfCall.enableModule(module),
+                },
+          ),
+        disableModule: (module: string, params: { dryRun?: boolean }) => {
+          const data = selfCall.disableModule(SENTINEL_MODULES, module);
+          return Promise.resolve(
+            params.dryRun
+              ? {
+                  dryRun: true as const,
+                  to: address,
+                  value: 0n,
+                  data,
+                  gasEstimate: 100_000n,
+                  description: 'disable module',
+                }
+              : {
+                  txHash: `0x${'11'.repeat(32)}`,
+                  chainTxHash: `0x${'22'.repeat(32)}`,
+                  to: address,
+                  value: 0n,
+                  data,
+                },
+          );
+        },
+        setupRecovery: (params: {
+          guardians: string[];
+          threshold: number;
+          recoveryPeriodSeconds: number;
+          dryRun?: boolean;
+        }) => {
+          const module = mainnet.contracts.socialRecovery!;
+          const data = recoveryCall.setupRecovery(
+            address,
+            params.guardians,
+            params.threshold,
+            params.recoveryPeriodSeconds,
+          );
+          return Promise.resolve(
+            params.dryRun
+              ? {
+                  dryRun: true as const,
+                  to: module,
+                  value: 0n,
+                  data,
+                  gasEstimate: 150_000n,
+                  description: 'setup recovery',
+                }
+              : {
+                  txHash: `0x${'ee'.repeat(32)}`,
+                  chainTxHash: `0x${'ff'.repeat(32)}`,
+                  to: module,
+                  value: 0n,
+                  data,
+                },
+          );
+        },
       },
       recovery: {
+        isEnabled: () => Promise.resolve(st.recoveryEnabled),
+        config: () => Promise.resolve(st.recoveryConfig),
         hasPending: () => Promise.resolve(st.hasPendingRecovery),
         // The real SDK has this; the fake did not, so anything calling it hit
         // a synchronous TypeError that no `.catch` could see.

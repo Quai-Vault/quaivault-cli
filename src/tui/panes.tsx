@@ -412,48 +412,94 @@ export function AssetsPane({ state }: { state: TuiState; env: TuiEnv }): React.R
 // ---------------------------------------------------------------- recovery
 
 export function RecoveryPane({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElement {
+  const module = state.recoveryModule;
   const r = state.recovery;
-  if (!r) {
-    return <Text color="green">No recovery pending on this vault.</Text>;
+  if (!module) {
+    return <Text dimColor>Recovery module details are loading.</Text>;
   }
-  const left = r.executableAt ? r.executableAt - env.now() : 0;
+  if (!module.address) {
+    return (
+      <Box flexDirection="column">
+        <Text color="yellow">No SocialRecoveryModule deployment is configured for this network.</Text>
+        <Text dimColor>Check the active profile and network configuration.</Text>
+      </Box>
+    );
+  }
+
+  const left = r?.executableAt ? r.executableAt - env.now() : 0;
   return (
     <Box flexDirection="column">
-      <Text color="red" bold>
-        RECOVERY PENDING — this replaces the entire owner set.
-      </Text>
-      {(r.additional ?? 0) > 0 ? (
-        <Text color="yellow">
-          {r.additional ?? 0} additional pending recovery request(s); `qv recovery status` shows all.
-        </Text>
-      ) : null}
-      <Box height={1} />
-      <Row label="Approvals" value={`${r.approvals} of ${r.required} guardians`} />
+      <Row label="Module" value={module.address} />
       <Row
-        label="Executable"
-        value={left > 0 ? `in ${formatDuration(left)}` : 'now'}
-        tone={left > 0 ? 'yellow' : 'red'}
+        label="Status"
+        value={module.enabled ? 'enabled' : 'disabled'}
+        tone={module.enabled ? 'green' : 'yellow'}
       />
-      {r.expiration ? <Row label="Expires" value={formatAbsolute(r.expiration)} /> : null}
+      {!module.enabled ? (
+        <Text color="cyan">Press s to propose enabling this configured recovery module.</Text>
+      ) : null}
+      {module.configured ? (
+        <>
+          <Row label="Guardians" value={`${module.threshold} of ${module.guardians.length}`} />
+          <Row label="Period" value={formatDuration(module.recoveryPeriod)} />
+          {module.guardians.map((guardian) => (
+            <Row key={guardian} label="" value={who(env, guardian)} />
+          ))}
+          {module.enabled ? (
+            <Text dimColor>
+              Press s to update the guardian configuration · d to propose disabling recovery.
+            </Text>
+          ) : (
+            <Text dimColor>This saved configuration is inactive while the module is disabled.</Text>
+          )}
+        </>
+      ) : module.enabled ? (
+        <Text color="cyan">No guardians configured. Press s to configure social recovery.</Text>
+      ) : (
+        <Text dimColor>No guardian configuration is set; configure it after enablement.</Text>
+      )}
       <Box height={1} />
-      <Text dimColor>Proposed new owners</Text>
-      {r.newOwners.map((o) => (
-        <Row key={o} label="" value={who(env, o)} />
-      ))}
-      <Row label="New threshold" value={String(r.newThreshold)} />
-      <Box height={1} />
-      <Text color="cyan">Press c to cancel this recovery. Cancelling is the defensive action.</Text>
-      <Text dimColor>
-        a approves it as a guardian · x executes it once the delay has elapsed. Each opens a
-        separate process that shows you the new owner set before signing.
-      </Text>
-      {(r.affordances ?? [])
-        .filter((item) => !item.allowed)
-        .map((item) => (
-          <Text key={item.action} dimColor>
-            {item.action}: {safeText(item.reason, 160)}
+      {!r ? (
+        <Text color="green">No recovery pending on this vault.</Text>
+      ) : (
+        <>
+          <Text color="red" bold>
+            RECOVERY PENDING — this replaces the entire owner set.
           </Text>
-        ))}
+          {(r.additional ?? 0) > 0 ? (
+            <Text color="yellow">
+              {r.additional ?? 0} additional pending recovery request(s); `qv recovery status` shows all.
+            </Text>
+          ) : null}
+          <Box height={1} />
+          <Row label="Approvals" value={`${r.approvals} of ${r.required} guardians`} />
+          <Row
+            label="Executable"
+            value={left > 0 ? `in ${formatDuration(left)}` : 'now'}
+            tone={left > 0 ? 'yellow' : 'red'}
+          />
+          {r.expiration ? <Row label="Expires" value={formatAbsolute(r.expiration)} /> : null}
+          <Box height={1} />
+          <Text dimColor>Proposed new owners</Text>
+          {r.newOwners.map((o) => (
+            <Row key={o} label="" value={who(env, o)} />
+          ))}
+          <Row label="New threshold" value={String(r.newThreshold)} />
+          <Box height={1} />
+          <Text color="cyan">Press c to cancel this recovery. Cancelling is the defensive action.</Text>
+          <Text dimColor>
+            a approves it as a guardian · x executes it once the delay has elapsed. Each opens a
+            separate process that shows you the new owner set before signing.
+          </Text>
+          {(r.affordances ?? [])
+            .filter((item) => !item.allowed)
+            .map((item) => (
+              <Text key={item.action} dimColor>
+                {item.action}: {safeText(item.reason, 160)}
+              </Text>
+            ))}
+        </>
+      )}
     </Box>
   );
 }

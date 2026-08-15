@@ -50,7 +50,7 @@ Proposing changes  (every one of these asks your co-owners to act)
   qv propose transfer|token|nft|erc1155|call|batch
   qv propose add-owner|remove-owner|threshold|delay
   qv propose module|delegatecall|sign-message|cancel-by-consensus
-  qv propose setup-recovery
+  qv propose enable-recovery|disable-recovery|setup-recovery
 
 Vaults, recovery, setup
   qv vault create · qv vault mine-salt
@@ -62,6 +62,19 @@ Vaults, recovery, setup
 Everything except `approve`/`execute`/`cancel`/`expire` is a **proposal**: it asks N−1
 other people to act. The naming says so, because `qv owner add` would read like it adds
 an owner when it actually asks two other people to.
+
+Social recovery is deliberately enabled in two reviewed proposals. First enable the
+module configured for the active network, then configure its guardians:
+
+```bash
+qv propose enable-recovery <vault>
+qv propose setup-recovery <vault> --guardian 0x… 0x… --threshold 2 --recovery-period 7d
+qv recovery status <vault> --json
+```
+
+`recovery status` reports the module address, enabled/configured state, guardian set,
+threshold, recovery period, and pending requests. In the TUI recovery pane, `s` opens
+the applicable enable or guardian-setup flow; `d` proposes disabling an enabled module.
 
 ## Before you sign
 

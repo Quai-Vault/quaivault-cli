@@ -220,6 +220,13 @@ describe('the propose form', () => {
     expect(s.form.kind).toBe('transfer');
   });
 
+  it('opens recovery setup directly on its first field', () => {
+    const s = reduce(initialState(), { type: 'open-form', kind: 'setup-recovery' });
+    expect(s.pane).toBe('propose');
+    expect(s.form.kind).toBe('setup-recovery');
+    expect(s.form.field).toBe(0);
+  });
+
   it('types printable characters into the focused field', () => {
     let s = press(form(), 'down'); // into the first field
     s = press(s, '0', 'x', 'a', 'b');
@@ -535,11 +542,23 @@ describe('vault switching', () => {
         required: 2,
       },
     });
+    s = reduce(s, {
+      type: 'recovery-module',
+      detail: {
+        address: ADDR.token,
+        enabled: true,
+        configured: true,
+        guardians: [ADDR.alice],
+        threshold: 1,
+        recoveryPeriod: 3600,
+      },
+    });
     expect(s.history).toHaveLength(1);
 
     s = press(s, ']');
     expect(s.history).toEqual([]);
     expect(s.vaultDetail).toBeNull();
+    expect(s.recoveryModule).toBeNull();
     expect(s.recovery).toBeNull();
   });
 

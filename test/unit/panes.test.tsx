@@ -175,14 +175,74 @@ describe('VaultPane and RecoveryPane', () => {
     expect(out).toContain('1 QUAI');
   });
 
-  it('reports no recovery in the affirmative, not as an empty pane', () => {
-    const out = strip(renderToString(<RecoveryPane state={initialState(10)} env={env} />));
+  it('shows the disabled module and offers the enable flow', () => {
+    const state: TuiState = {
+      ...initialState(10),
+      recoveryModule: {
+        address: mainnet.contracts.socialRecovery ?? null,
+        enabled: false,
+        configured: false,
+        guardians: [],
+        threshold: 0,
+        recoveryPeriod: 0,
+      },
+    };
+    const out = strip(renderToString(<RecoveryPane state={state} env={env} />));
+    expect(out).toContain(mainnet.contracts.socialRecovery);
+    expect(out).toMatch(/disabled/);
+    expect(out).toMatch(/Press s to propose enabling/);
     expect(out).toMatch(/No recovery pending/);
+  });
+
+  it('shows guardian details even when no recovery is pending', () => {
+    const state: TuiState = {
+      ...initialState(10),
+      recoveryModule: {
+        address: mainnet.contracts.socialRecovery ?? null,
+        enabled: true,
+        configured: true,
+        guardians: [ADDR.alice, ADDR.bob],
+        threshold: 2,
+        recoveryPeriod: 604_800,
+      },
+    };
+    const out = strip(renderToString(<RecoveryPane state={state} env={env} />));
+    expect(out).toContain('2 of 2');
+    expect(out).toContain(ADDR.alice);
+    expect(out).toContain('7d');
+    expect(out).toMatch(/d to propose disabling/);
+    expect(out).toMatch(/No recovery pending/);
+  });
+
+  it('keeps a disabled module\'s saved guardian configuration visible', () => {
+    const state: TuiState = {
+      ...initialState(10),
+      recoveryModule: {
+        address: mainnet.contracts.socialRecovery ?? null,
+        enabled: false,
+        configured: true,
+        guardians: [ADDR.alice],
+        threshold: 1,
+        recoveryPeriod: 86_400,
+      },
+    };
+    const out = strip(renderToString(<RecoveryPane state={state} env={env} />));
+    expect(out).toContain(ADDR.alice);
+    expect(out).toContain('1d');
+    expect(out).toMatch(/inactive while the module is disabled/);
   });
 
   it('states plainly that a pending recovery replaces the owner set', () => {
     const state: TuiState = {
       ...initialState(10),
+      recoveryModule: {
+        address: mainnet.contracts.socialRecovery ?? null,
+        enabled: true,
+        configured: true,
+        guardians: [ADDR.alice, ADDR.bob, ADDR.carol],
+        threshold: 3,
+        recoveryPeriod: 604_800,
+      },
       recovery: {
         hash: `0x${'re'.repeat(32)}`,
         newOwners: [ADDR.carol],

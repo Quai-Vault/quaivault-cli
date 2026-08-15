@@ -6,6 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is `0.x`, minor bumps may contain breaking changes.
 
+## [0.6.0] — 2026-08-15
+
+### Added
+
+- First-class `propose enable-recovery` and `propose disable-recovery` commands use
+  only the SocialRecoveryModule configured for the active network, while retaining
+  the normal proposal disclosure, quorum, timelock, policy, and dry-run safeguards.
+- The TUI recovery pane shows module enablement, saved guardian configuration,
+  threshold, recovery period, and pending requests together. Contextual `s` and `d`
+  actions delegate enable, setup, and disable writes to the one-shot CLI.
+
+### Changed
+
+- `recovery status` now reports the module address and explicit enabled/configured
+  state in both human and JSON output, preserves configuration visibility while a
+  module is disabled, and supplies actionable next commands for agents.
+- Recovery setup fails early with an exact enablement remediation when the configured
+  module is not yet enabled. Module events now invalidate recovery status and refresh
+  the TUI instead of leaving stale enablement state visible.
+
+### Security
+
+- Recovery module shortcuts never accept a free-text module address and never bypass
+  the generic unverified-module gate. A missing network deployment fails closed rather
+  than inventing or guessing an address.
+
 ## [0.5.0] — 2026-08-06
 
 ### Security
