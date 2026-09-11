@@ -52,24 +52,34 @@ export function loadPolicy(path = policyPath()): Policy | null {
     throw new Error(`Could not read policy at ${path}: ${e.message}`);
   }
   const o = (raw ?? {}) as Record<string, unknown>;
-  const strList = (v: unknown): string[] =>
-    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-  const abiSources = strList(o.require_abi_source).filter((s): s is AbiSource =>
-    ['builtin', 'heuristic', 'supplied', 'none'].includes(s),
-  );
-  return {
-    maxValuePerApprovalWei:
-      typeof o.max_value_per_approval_wei === 'string'
-        ? BigInt(o.max_value_per_approval_wei)
-        : undefined,
-    maxApprovalsPerHour:
-      typeof o.max_approvals_per_hour === 'number' ? o.max_approvals_per_hour : undefined,
-    allowTo: strList(o.allow_to).map((a) => a.toLowerCase()),
-    denyKinds: strList(o.deny_kinds),
-    denyDelegatecall: o.deny_delegatecall !== false,
-    requireAbiSource: abiSources.length ? abiSources : ['builtin'],
-    allowRecoveryActions: strList(o.allow_recovery_actions),
+  let policy: Policy = {
+    allowTo: [], denyKinds: [], denyDelegatecall: true,
+    requireAbiSource: ['builtin'], allowRecoveryActions: [],
   };
+  for (const [field, value] of Object.entries(o)) {
+    if (!POLICY_FIELDS.includes(field as PolicyField)) {
+      throw new Error(`Unknown policy field ${JSON.stringify(field)}.`);
+    }
+    const key = field as PolicyField;
+    let text: string;
+    if (key === 'max_value_per_approval_wei') {
+      if (typeof value !== 'string' || !/^\d+$/.test(value)) throw new Error(`${field} must be a decimal string of wei.`);
+      text = value;
+    } else if (key === 'max_approvals_per_hour') {
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new Error(`${field} must be a non-negative safe integer.`);
+      text = String(value);
+    } else if (key === 'deny_delegatecall') {
+      if (typeof value !== 'boolean') throw new Error(`${field} must be a boolean.`);
+      text = String(value);
+    } else {
+      if (!Array.isArray(value) || value.some((v) => typeof v !== 'string' || v.includes(',') || !v.trim())) {
+        throw new Error(`${field} must be an array of non-empty strings.`);
+      }
+      text = value.join(',');
+    }
+    policy = withPolicyField(policy, key, text);
+  }
+  return policy;
 }
 
 export const STARTER_POLICY = `# QuaiVault CLI policy
@@ -231,7 +241,7 @@ export function withPolicyField(policy: Policy, field: PolicyField, raw: string)
     }
     case 'max_approvals_per_hour': {
       if (value === '') return { ...policy, maxApprovalsPerHour: undefined };
-      if (!/^\d+$/.test(value)) throw new Error('Expected a whole number, or empty for no limit.');
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('Expected a safe whole number, or empty for no limit.');
       return { ...policy, maxApprovalsPerHour: Number(value) };
     }
     case 'allow_to': {

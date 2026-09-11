@@ -217,6 +217,7 @@ const NOT_APPLICABLE: Record<string, string> = {
 /** Error classes. The renderer maps these by code, not by class identity. */
 const ERROR_CLASSES = new Set([
   'AbortError',
+  'BroadcastError',
   'ConfigError',
   'NoIndexerError',
   'NoSignerError',

@@ -11,7 +11,7 @@ import { batchOf, renderDisclosure } from '../render/transaction.js';
 import { isUnverified, type BatchAnalysis } from '../abi/batch.js';
 import { resolveTxHash } from './tx-read.js';
 import { transactionFingerprint, transactionFromChain } from '../sdk/chain-transaction.js';
-import { recentPolicyActionCount, recordPolicyAction } from '../context/policy-journal.js';
+import { recentPolicyActionCount, reservePolicyAction } from '../context/policy-journal.js';
 
 interface LifecycleInput {
   vault?: string;
@@ -372,24 +372,18 @@ export const txApproveCommand: CommandSpec<LifecycleInput, WriteResult, Disclosu
       };
     }
 
+    if (input.andExecute && tx.executionDelay > 0) {
+      throw new PreconditionError('This vault has a timelock. Approve now, then execute once it clears.');
+    }
+    if (ctx.policy && (ctx.flags.yes || !ctx.interactive)) {
+      reservePolicyAction({
+        at: ctx.now(), profile: ctx.profileName, action: 'approve', vault: address,
+        transactionHash: tx.hash, chainTxHash: '',
+      }, ctx.policy.maxApprovalsPerHour);
+    }
+
     if (input.andExecute) {
-      if (tx.executionDelay > 0) {
-        throw new PreconditionError(
-          'This vault has a timelock, so approve-and-execute cannot run in one transaction.',
-          'Approve now, then `qv tx execute` once the timelock clears.',
-        );
-      }
       const result = await vault.approveAndExecute(tx.hash);
-      if (ctx.policy && (ctx.flags.yes || !ctx.interactive)) {
-        recordPolicyAction({
-          at: ctx.now(),
-          profile: ctx.profileName,
-          action: 'approve',
-          vault: address,
-          transactionHash: tx.hash,
-          chainTxHash: result.chainTxHash,
-        });
-      }
       return {
         data: {
           hash: tx.hash,
@@ -413,16 +407,6 @@ export const txApproveCommand: CommandSpec<LifecycleInput, WriteResult, Disclosu
     }
 
     const { chainTxHash } = await vault.approve(tx.hash);
-    if (ctx.policy && (ctx.flags.yes || !ctx.interactive)) {
-      recordPolicyAction({
-        at: ctx.now(),
-        profile: ctx.profileName,
-        action: 'approve',
-        vault: address,
-        transactionHash: tx.hash,
-        chainTxHash,
-      });
-    }
     // §4.1: an indexer stall after a successful write exits 0 — exiting
     // non-zero invites a retry of a multisig transaction that already
     // succeeded. But it must still be *said*, or the next `qv tx show`
@@ -518,7 +502,7 @@ export const txExecuteCommand: CommandSpec<LifecycleInput, WriteResult, Disclosu
         outcome: result.outcome,
         message: result.message,
       },
-      changed: result.outcome === 'executed' || result.outcome === 'timelock_started',
+      changed: result.outcome !== 'approved_only',
       retryable: result.outcome === 'timelock_started' || result.outcome === 'approved_only',
       steps: [
         {

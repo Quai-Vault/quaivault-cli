@@ -99,7 +99,7 @@ function buildContext(flags: GlobalFlags, io: Io, held: { signer?: SignerResolut
       // The signer must be able to act, and a mismatch between the configured
       // identity and the unlocked key means someone would sign as the wrong
       // owner — which is a fund-loss bug, not a UX quirk.
-      const declared = flags.as ?? profile.address;
+      const declared = flags.as ?? process.env.QUAIVAULT_ADDRESS ?? profile.address;
       if (declared && declared.toLowerCase() !== resolved.address.toLowerCase()) {
         throw new PreconditionError(
           `The unlocked key is ${resolved.address}, but you are acting as ${declared}.`,
@@ -265,6 +265,11 @@ export async function runCommand(opts: RunOptions): Promise<ExitCodeValue> {
           changed: false,
           retryable: retryableErrorCode(e.code),
           error: errorToJson(e),
+          ...(e.code === 'BROADCAST_UNKNOWN' ? {
+            changed: 'unknown' as const,
+            retryable: false,
+            data: { chainTxHash: e.chainTxHash ?? null },
+          } : {}),
         }),
       );
     } else {

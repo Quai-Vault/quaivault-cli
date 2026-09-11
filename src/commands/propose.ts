@@ -14,7 +14,7 @@ import {
   parseUnits,
 } from '../format/index.js';
 import type { Io } from '../render/io.js';
-import { findOperation, recordOperation, type OperationRecord } from '../context/operation-journal.js';
+import { findOperation, reserveOperation, recordOperation, type OperationRecord } from '../context/operation-journal.js';
 import { checkPolicy } from '../context/policy.js';
 import { analyzeBatch, isUnverified, type BatchAnalysis } from '../abi/batch.js';
 
@@ -336,7 +336,11 @@ function makeProposeCommand<I extends ProposeCommon>(cfg: {
       // empty journal and broadcast duplicate proposals.
       const idempotencyKey = planned.disclosure.idempotencyKey;
       if (idempotencyKey) {
-        const prior = findOperation(ctx.profileName, idempotencyKey);
+        const prior = reserveOperation({
+          at: ctx.now(), profile: ctx.profileName, key: idempotencyKey,
+          fingerprint: planned.disclosure.requestFingerprint, command: cfg.path.join(' '),
+          vault: planned.disclosure.address, transactionHash: '', chainTxHash: '',
+        });
         if (prior) {
           if (prior.fingerprint !== planned.disclosure.requestFingerprint) {
             throw new UsageError(

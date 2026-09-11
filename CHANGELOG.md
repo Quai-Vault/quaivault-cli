@@ -6,6 +6,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is `0.x`, minor bumps may contain breaking changes.
 
+## [0.6.1] — 2026-09-11
+
+### Security
+
+- Use SDK 0.6.1 network, signer-address, deployment-salt, and receipt safeguards.
+- Enforce `QUAIVAULT_ADDRESS` when validating the unlocked identity and reject invalid
+  network names instead of silently selecting mainnet.
+- Validate every policy field and reject malformed limits, lists, and unknown fields.
+- Reserve hourly approval budget and idempotency keys durably before submission.
+  Unresolved keyed submissions fail closed; concurrent signers cannot reuse a slot.
+- Keep signing locks until released; elapsed time no longer permits stealing a live
+  lock. Abandoned locks require reconciliation and manual removal.
+- Bound all scrypt and PBKDF2 work before decrypting keystores; handle field casing
+  consistently with quais. Key imports cannot overwrite a concurrently imported key.
+- Update Vitest to 4.1.11 and refresh vulnerable development dependencies.
+
+### Fixed
+
+- JSON reports `BROADCAST_UNKNOWN` with `changed: "unknown"`, `retryable: false`, and
+  the chain transaction hash when receipt verification fails after submission.
+- Terminal target-call failures report `changed: true`, reflecting the consumed proposal.
+- Environment-key signing creates its lock directory on first use. Atomic writes
+  use unique temporary filenames and clean up after failures.
+
 ## [0.6.0] — 2026-08-15
 
 ### Added

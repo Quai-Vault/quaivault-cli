@@ -131,11 +131,21 @@ qv --schema --schema-version 1  # every command, flag and output shape
   `--expect-abi-source` all fail closed against re-read chain state before signing.
 - **Retry proposals deliberately:** pass `--idempotency-key <stable-operation-id>`. Successful
   broadcasts are journaled durably, and a retry with the same inputs returns `changed: false`;
-  reusing the key for different inputs fails closed.
+  reusing the key for different inputs fails closed. Keys are reserved before submission;
+  an interrupted or unresolved submission blocks reuse until its chain history and local
+  journal have been reconciled. Never work around this by inventing a new key.
+
+A receipt timeout after submission reports `BROADCAST_UNKNOWN`, `changed: "unknown"`,
+`retryable: false`, and `chainTxHash` in both `data` and `error`. Look up that hash before
+retrying. The SDK verifies the selected chain ID against both the read and signing RPCs
+before each broadcast; misspelled network names are rejected.
+
+Signing locks are never reclaimed based on age. After a crash, verify the recorded PID
+and pending transactions before manually removing the lock named in the error.
 
 ### Agents may sign, within a policy
 
-Non-interactive signing requires a policy file that the caller cannot override:
+Non-interactive signing requires a policy file in the CLI configuration directory:
 
 ```bash
 qv policy init      # writes ~/.quaivault/policy.toml
@@ -263,3 +273,15 @@ verify with `npm audit signatures`.
 ## License
 
 MIT
+
+### Security checks in 0.6.1
+
+Policy files reject unknown fields, malformed values, and invalid numeric limits rather
+than dropping those bounds. The hourly limit reserves an approval slot before signing,
+including attempts whose result is uncertain; reservations expire after one hour.
+
+Keystore import bounds scrypt N, r, p and combined memory/CPU cost, plus PBKDF2 iterations,
+before deriving a key. The default floor is scrypt N=131072 and r=8, or 600000 PBKDF2
+iterations. `--accept-weak-kdf` permits a lower floor at import but never bypasses resource
+limits. Imported keys are re-encrypted with the normal scrypt settings. Concurrent imports
+cannot overwrite an existing key file.

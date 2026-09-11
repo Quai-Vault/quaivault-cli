@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, mkdirSync, renameSync, openSync, closeSync, fsyncSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, openSync, closeSync, fsyncSync, linkSync, unlinkSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
@@ -50,23 +51,26 @@ export function configPath(): string {
  * leave no file at all (plan §3.5) — for a keystore that is a lost signing
  * seat, and the same rule applies to every file we write.
  */
-export function writeFileAtomic(path: string, contents: string, mode = 0o600): void {
+export function writeFileAtomic(path: string, contents: string, mode = 0o600, noReplace = false): void {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const tmp = join(dir, `.tmp-${process.pid}-${Date.now().toString(36)}`);
-  const fd = openSync(tmp, 'wx', mode);
+  const tmp = join(dir, `.tmp-${process.pid}-${randomUUID()}`);
   try {
-    writeFileSync(fd, contents, { encoding: 'utf8' });
-    fsyncSync(fd);
+    const fd = openSync(tmp, 'wx', mode);
+    try {
+      writeFileSync(fd, contents, { encoding: 'utf8' });
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    // link is an atomic create-if-absent; rename would overwrite a key imported
+    // by another process while encryption was in progress.
+    if (noReplace) { linkSync(tmp, path); unlinkSync(tmp); }
+    else renameSync(tmp, path);
+    const dirFd = openSync(dir, 'r');
+    try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
   } finally {
-    closeSync(fd);
-  }
-  renameSync(tmp, path);
-  const dirFd = openSync(dir, 'r');
-  try {
-    fsyncSync(dirFd);
-  } finally {
-    closeSync(dirFd);
+    try { unlinkSync(tmp); } catch { /* Preserve the original write error if cleanup fails. */ }
   }
 }
 
@@ -100,6 +104,9 @@ export function loadConfig(path = configPath()): CliConfig {
   const profiles: Record<string, Profile> = {};
   for (const [name, value] of Object.entries(profilesRaw)) {
     const p = asRecord(value);
+    if (p.network !== undefined && p.network !== 'mainnet' && p.network !== 'testnet') {
+      throw new Error(`Invalid network in profile ${JSON.stringify(name)}: expected mainnet or testnet.`);
+    }
     const network = p.network === 'testnet' ? 'testnet' : 'mainnet';
     profiles[safeText(name, 64) || 'default'] = {
       network,

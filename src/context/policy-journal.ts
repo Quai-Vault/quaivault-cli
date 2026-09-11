@@ -1,6 +1,7 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { configHome } from './config.js';
+import { PolicyViolation } from './policy.js';
 
 interface JournalEntry {
   at: number;
@@ -46,7 +47,22 @@ export function recentPolicyActionCount(profile: string, action: string, now: nu
     .length;
 }
 
-/** Append only after a broadcast succeeds. The signing lock serializes writers. */
+/** Reserve before signing: timeouts and competing keys must still consume budget. */
+export function reservePolicyAction(entry: JournalEntry, max?: number): void {
+  mkdirSync(configHome(), { recursive: true, mode: 0o700 });
+  const lock = join(configHome(), '.policy-actions.lock');
+  let fd: number;
+  try { fd = openSync(lock, 'wx', 0o600); }
+  catch { throw new PolicyViolation('max_approvals_per_hour', 'The policy journal is locked; verify no other invocation is reserving approval budget before retrying.'); }
+  try {
+    if (max !== undefined && recentPolicyActionCount(entry.profile, entry.action, entry.at) >= max) {
+      throw new PolicyViolation('max_approvals_per_hour', 'The hourly approval budget has been consumed or reserved.');
+    }
+    recordPolicyAction(entry);
+  } finally { closeSync(fd); unlinkSync(lock); }
+}
+
+/** Append a durable action or reservation. */
 export function recordPolicyAction(entry: JournalEntry): void {
   mkdirSync(configHome(), { recursive: true, mode: 0o700 });
   const fd = openSync(journalPath(), 'a', 0o600);

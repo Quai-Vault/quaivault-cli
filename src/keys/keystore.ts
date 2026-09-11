@@ -23,10 +23,10 @@ import { UsageError, PreconditionError } from '../context/context.js';
  * with **zero new dependencies**. Its default is scrypt N=2^17 — the
  * interop-safe floor, not the notoriously weak N=4096 "light" preset.
  *
- * V3's real weakness is that its MAC covers only `derivedKey[16:32] ‖
- * ciphertext`, leaving `kdfparams` unauthenticated: an attacker with write
- * access could lower N and brute-force a copy taken earlier. The mitigation is
- * **policy, not cryptography** — validate before deriving. See `assertSaneKdf`.
+ * Keystore files are untrusted inputs. Bound every KDF cost before deriving,
+ * both to refuse weak encryption and to prevent excessive memory or CPU use.
+ * Changing KDF parameters on an existing file does not reduce the work needed
+ * to decrypt its ciphertext: the derived key and MAC would no longer match.
  */
 
 /** Below this, a keystore is cheap enough to brute-force. */
@@ -74,6 +74,7 @@ function assertSafeFile(path: string): void {
       'Replace it with a real file.',
     );
   }
+  if (!st.isFile()) throw new PreconditionError(`Refusing to use ${path}: not a regular file.`);
   const mode = st.mode & 0o777;
   if (mode & 0o077) {
     throw new PreconditionError(
@@ -104,27 +105,65 @@ function assertSafeDir(): string {
  * also a DoS guard: quais' only backstop is a 1 GiB `maxmem`.
  */
 export function assertSaneKdf(json: string, allowWeak: boolean): void {
-  let parsed: { crypto?: { kdfparams?: { n?: unknown } }; Crypto?: { kdfparams?: { n?: unknown } } };
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(json) as typeof parsed;
+    parsed = JSON.parse(json);
   } catch {
     throw new UsageError('Not a valid JSON keystore.');
   }
-  const kdf = parsed.crypto?.kdfparams ?? parsed.Crypto?.kdfparams;
-  const n = kdf?.n;
-  if (typeof n !== 'number') return; // pbkdf2 or unknown; quais will reject if unsupported
-  if (n > MAX_SCRYPT_N) {
-    throw new PreconditionError(
-      `Keystore declares scrypt N=${n}, above the accepted maximum of ${MAX_SCRYPT_N}.`,
-      'A tampered file can use this to exhaust memory and CPU. Refusing to derive.',
-    );
+  const record = (v: unknown): Record<string, unknown> => {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) {
+      throw new UsageError('Invalid keystore KDF parameters.');
+    }
+    // quais reads keystore fields case-insensitively. Validate the same fields,
+    // and reject ambiguous spellings instead of checking a different KDF.
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(v)) {
+      const lower = key.toLowerCase();
+      if (Object.hasOwn(out, lower)) throw new UsageError('Ambiguous keystore fields.');
+      out[lower] = value;
+    }
+    return out;
+  };
+  const crypto = record(record(parsed).crypto);
+  const params = record(crypto.kdfparams);
+  const integer = (name: string): number => {
+    const value = params[name];
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+      throw new UsageError(`Invalid keystore KDF parameter ${name}.`);
+    }
+    return value;
+  };
+  if (integer('dklen') !== 32) throw new UsageError('Keystore dklen must be 32.');
+  if (typeof params.salt !== 'string' || !/^(?:[0-9a-f]{2}){16,64}$/i.test(params.salt)) {
+    throw new UsageError('Keystore KDF salt must contain 16 to 64 bytes of hex.');
   }
-  if (n < MIN_SCRYPT_N && !allowWeak) {
-    throw new PreconditionError(
-      `Keystore declares scrypt N=${n}, below the accepted minimum of ${MIN_SCRYPT_N}.`,
-      'V3 does not authenticate its KDF parameters, so this may be a downgrade. ' +
-        'Re-encrypt with `qv key change-password`, or pass --accept-weak-kdf if you are sure.',
-    );
+  const kdf = typeof crypto.kdf === 'string' ? crypto.kdf.toLowerCase() : '';
+  if (kdf === 'scrypt') {
+    const n = integer('n');
+    const r = integer('r');
+    const p = integer('p');
+    if (n > MAX_SCRYPT_N) {
+      throw new PreconditionError(`Keystore declares scrypt N=${n}, above the accepted maximum of ${MAX_SCRYPT_N}.`);
+    }
+    if (!Number.isInteger(Math.log2(n))) throw new UsageError('scrypt N must be a power of two.');
+    if (r > 32 || p > 16 || n * r > MAX_SCRYPT_N * 8 || n * r * p > MAX_SCRYPT_N * 8) {
+      throw new PreconditionError('Keystore scrypt parameters exceed the memory or CPU budget.');
+    }
+    if (!allowWeak && (n < MIN_SCRYPT_N || r < 8)) {
+      throw new PreconditionError(
+        'Keystore scrypt cost is below the accepted minimum.',
+        'Re-encrypt with `qv key change-password`, or explicitly accept a weak KDF at import.',
+      );
+    }
+  } else if (kdf === 'pbkdf2') {
+    const c = integer('c');
+    const prf = typeof params.prf === 'string' ? params.prf.toLowerCase() : '';
+    if (prf !== 'hmac-sha256' && prf !== 'hmac-sha512') throw new UsageError('Unsupported PBKDF2 PRF.');
+    if (c > 10_000_000) throw new PreconditionError('Keystore PBKDF2 cost exceeds the CPU budget.');
+    if (!allowWeak && c < 600_000) throw new PreconditionError('Keystore PBKDF2 cost is below the accepted minimum of 600000 iterations.');
+  } else {
+    throw new UsageError('Unsupported keystore KDF.');
   }
 }
 
@@ -187,7 +226,7 @@ export async function saveKey(name: string, privateKey: Uint8Array, password: st
     { address, privateKey: signingKey.privateKey },
     password,
   );
-  writeFileAtomic(path, `${json}\n`, 0o600);
+  writeFileAtomic(path, `${json}\n`, 0o600, true);
   return { name, address, path };
 }
 

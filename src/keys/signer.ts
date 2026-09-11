@@ -1,10 +1,11 @@
-import { openSync, closeSync, unlinkSync, readFileSync, writeFileSync } from 'node:fs';
+import { openSync, closeSync, unlinkSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { getBytes, SigningKey, Wallet, type Signer } from 'quais';
 import { configHome } from '../context/config.js';
 import { PreconditionError, UsageError } from '../context/context.js';
 import type { Profile } from '../context/config.js';
-import { unlockKey } from './keystore.js';
+import { unlockKey, assertQuaiLedgerAddress } from './keystore.js';
 import { readPassword, resolvePasswordSource } from './password.js';
 
 export interface SignerResolution {
@@ -61,9 +62,13 @@ export async function resolveSigner(
   }
 
   const bytes = getBytes(raw.startsWith('0x') ? raw : `0x${raw}`);
-  const signingKey = new SigningKey(bytes);
-  bytes.fill(0);
-  const wallet = new Wallet(signingKey, provider as never);
+  let wallet: Wallet;
+  try {
+    wallet = new Wallet(new SigningKey(bytes), provider as never);
+  } catch {
+    throw new UsageError('The configured private key is not a valid secp256k1 key.');
+  } finally { bytes.fill(0); }
+  assertQuaiLedgerAddress(wallet.address);
   const lock = acquireSigningLock(wallet.address);
   return { signer: wallet, address: wallet.address, release: () => lock.release() };
 }
@@ -84,9 +89,8 @@ export interface SigningLock {
   release(): void;
 }
 
-const STALE_LOCK_MS = 120_000;
-
 export function acquireSigningLock(address: string): SigningLock {
+  mkdirSync(configHome(), { recursive: true, mode: 0o700 });
   const path = join(configHome(), `.signing-${address.toLowerCase()}.lock`);
   const tryOpen = (): number | null => {
     try {
@@ -97,37 +101,22 @@ export function acquireSigningLock(address: string): SigningLock {
     }
   };
 
-  let fd = tryOpen();
+  const fd = tryOpen();
   if (fd === null) {
-    // A crashed invocation leaves a lock behind; treat an old one as dead.
-    let stale = false;
-    try {
-      const age = Date.now() - Number(readFileSync(path, 'utf8').split('\n')[1] ?? 0);
-      stale = Number.isFinite(age) && age > STALE_LOCK_MS;
-    } catch {
-      stale = true;
-    }
-    if (!stale) {
-      throw new PreconditionError(
-        `Another qv invocation is signing with ${address}.`,
-        'Concurrent signing with one key collides on the nonce. Retry when it finishes.',
-      );
-    }
-    try {
-      unlinkSync(path);
-    } catch {
-      /* raced with the holder exiting; fall through */
-    }
-    fd = tryOpen();
-    if (fd === null) {
-      throw new PreconditionError(`Another qv invocation is signing with ${address}.`);
-    }
+    // A slow receipt is not a dead process. Automatic unlink/reopen also races
+    // between contenders, allowing both to sign. Fail closed for abandoned locks.
+    throw new PreconditionError(
+      `Another qv invocation may be signing with ${address}.`,
+      `Retry when it finishes. If it crashed, verify its PID and pending transactions before manually removing ${path}.`,
+    );
   }
 
+  const token = `${process.pid}\n${Date.now()}\n${randomUUID()}\n`;
   try {
-    writeFileSync(fd, `${process.pid}\n${Date.now()}\n`);
-  } catch {
-    /* best effort */
+    writeFileSync(fd, token);
+  } catch (err) {
+    unlinkSync(path);
+    throw err;
   } finally {
     closeSync(fd);
   }
@@ -137,7 +126,7 @@ export function acquireSigningLock(address: string): SigningLock {
     if (released) return;
     released = true;
     try {
-      unlinkSync(path);
+      if (readFileSync(path, 'utf8') === token) unlinkSync(path);
     } catch {
       /* already gone */
     }

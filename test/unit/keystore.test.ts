@@ -44,12 +44,10 @@ describe('key names cannot escape the keystore directory', () => {
   });
 });
 
-describe('KDF validation closes V3 unauthenticated kdfparams', () => {
-  const ks = (n: number): string => JSON.stringify({ crypto: { kdfparams: { n } } });
+describe('KDF validation bounds untrusted work', () => {
+  const ks = (n: number): string => JSON.stringify({ crypto: { kdf: 'scrypt', kdfparams: { n, r: 8, p: 1, dklen: 32, salt: 'ab'.repeat(32) } } });
 
   it('refuses a downgraded N', () => {
-    // V3's MAC does not cover kdfparams, so an attacker with write access could
-    // lower N and brute-force a copy taken earlier. This check is the control.
     expect(() => assertSaneKdf(ks(4096), false)).toThrow(/below the accepted minimum/);
     expect(() => assertSaneKdf(ks(MIN_SCRYPT_N - 1), false)).toThrow();
   });

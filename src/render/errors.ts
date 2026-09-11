@@ -8,6 +8,7 @@ export interface RenderedError {
   code: string;
   message: string;
   remediation?: string;
+  chainTxHash?: string;
   /** Executable commands that would resolve this. The CLI's value-add. */
   next?: string[];
 }
@@ -30,6 +31,7 @@ const REMEDY: Record<string, string[] | typeof NO_COMMAND> = {
   PRECONDITION: NO_COMMAND,
   NOT_FOUND: NO_COMMAND,
   REVERT: NO_COMMAND,
+  BROADCAST_UNKNOWN: NO_COMMAND,
   ABORTED: NO_COMMAND,
   INDEXER_QUERY: ['qv status'],
   SALT_MINING: NO_COMMAND,
@@ -60,6 +62,7 @@ export function normalizeError(err: unknown): RenderedError {
       remediation:
         typeof json.remediation === 'string' ? safeText(json.remediation, 512) : undefined,
       next: remedyFor(code),
+      ...(typeof json.chainTxHash === 'string' ? { chainTxHash: json.chainTxHash } : {}),
     };
   }
   if (err && typeof err === 'object' && 'code' in err) {
@@ -82,6 +85,7 @@ export function normalizeError(err: unknown): RenderedError {
 export function errorToJson(e: RenderedError): JsonValue {
   const out: Record<string, JsonValue> = { code: e.code, message: e.message };
   if (e.remediation) out.remediation = e.remediation;
+  if (e.chainTxHash) out.chainTxHash = e.chainTxHash;
   if (e.next?.length) out.next = e.next;
   return out;
 }

@@ -58,7 +58,13 @@ async function readRawKey(
       'Expected 64 hex characters, optionally 0x-prefixed.',
     );
   }
-  return getBytes(trimmed.startsWith('0x') ? trimmed : `0x${trimmed}`);
+  const bytes = getBytes(trimmed.startsWith('0x') ? trimmed : `0x${trimmed}`);
+  try { new Wallet(new SigningKey(bytes)); }
+  catch {
+    bytes.fill(0);
+    throw new UsageError('That is not a valid secp256k1 private key.');
+  }
+  return bytes;
 }
 
 export const keyImportCommand: CommandSpec<
