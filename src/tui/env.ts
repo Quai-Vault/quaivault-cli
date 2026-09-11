@@ -19,6 +19,7 @@ import type { Tone } from '../format/tone.js';
 export interface TuiEnv {
   /** The address we are acting as. Display only. */
   identity: string;
+  profile?: string;
   /** Reverse-resolve an address to a configured contact name. */
   contactName(address: string): string | undefined;
   /** Skew-adjusted seconds, for absolute comparisons against chain time. */

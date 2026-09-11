@@ -28,6 +28,11 @@ jobs:
       # in dist/ and skips itself when dist/ is absent.
       - run: npm run build
       - run: npm test
+      - name: terminal input, resize, and signer handoff
+        run: |
+          python3 -m venv /tmp/qv-tui-python
+          /tmp/qv-tui-python/bin/pip install pyte==0.8.2 wcwidth==0.8.3
+          QV_TUI_PYTHON=/tmp/qv-tui-python/bin/python npm run test:tui-pty
       # Exactly one copy of quais, and within the SDK's declared peer range.
       # `--legacy-peer-deps` can bypass the allowlist silently.
       - name: quais is single-copy and in range

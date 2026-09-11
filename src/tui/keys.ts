@@ -20,6 +20,12 @@ export interface InkKey {
   delete?: boolean;
   ctrl?: boolean;
   shift?: boolean;
+  home?: boolean;
+  end?: boolean;
+  pageUp?: boolean;
+  pageDown?: boolean;
+  meta?: boolean;
+  super?: boolean;
 }
 
 /**
@@ -46,7 +52,7 @@ export interface InkKey {
 export function pastedText(input: string, key: InkKey): string | null {
   if (input.length < 2) return null;
   if (
-    key.ctrl ||
+    key.ctrl || key.meta || key.super || key.home || key.end || key.pageUp || key.pageDown ||
     key.tab ||
     key.escape ||
     key.return ||
@@ -63,6 +69,7 @@ export function pastedText(input: string, key: InkKey): string | null {
 }
 
 export function mapKey(input: string, key: InkKey): string | null {
+  if (key.meta || key.super) return null;
   if (key.tab) return key.shift ? 'shift-tab' : 'tab';
   if (key.escape) return 'escape';
   if (key.return) return 'return';
@@ -70,11 +77,16 @@ export function mapKey(input: string, key: InkKey): string | null {
   if (key.downArrow) return 'down';
   if (key.leftArrow) return 'left';
   if (key.rightArrow) return 'right';
-  if (key.backspace || key.delete) return 'backspace';
-  if (key.ctrl && input === 'u') return 'ctrl-u';
+  if (key.home) return 'home';
+  if (key.end) return 'end';
+  if (key.pageUp) return 'page-up';
+  if (key.pageDown) return 'page-down';
+  if (key.backspace) return 'backspace';
+  if (key.delete) return 'delete';
+  if (key.ctrl && ['a', 'e', 'u', 'w', 'k'].includes(input)) return `ctrl-${input}`;
   // Ctrl-anything-else is a control gesture we do not handle; it must never
   // reach a text field as a character.
   if (key.ctrl) return null;
-  if (input.length === 1 && input >= ' ') return input;
+  if (Array.from(input).length === 1 && !/[\p{Cc}\p{Cf}]/u.test(input)) return input;
   return null;
 }

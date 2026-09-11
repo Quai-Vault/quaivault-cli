@@ -1,4 +1,5 @@
 import type { Affordance, RecoveryAffordance, TokenBalance, VaultTransaction } from '@quaivault/sdk';
+import { editText, EDIT_KEYS } from './editor.js';
 import type { BatchAnalysis } from '../abi/batch.js';
 
 /**
@@ -76,6 +77,8 @@ export interface VaultSummary {
 }
 
 export interface VaultDetail {
+  delegatecallTargets?: string[];
+  signedMessages?: string[];
   owners: string[];
   threshold: number;
   minExecutionDelay: number;
@@ -130,6 +133,7 @@ export type ProposeKind =
   | 'erc1155'
   | 'call'
   | 'batch'
+  | 'abi-call'
   | 'add-owner'
   | 'remove-owner'
   | 'threshold'
@@ -177,6 +181,7 @@ export const FORM_FIELDS: Record<ProposeKind, readonly FormField[]> = {
     { name: 'token', label: 'token', hint: '0x… token contract', required: true },
     { name: 'to', label: 'to', hint: '0x… recipient', required: true },
     { name: 'amount', label: 'amount', hint: 'in token units', required: true },
+    { name: 'decimals', label: 'decimals', hint: 'token decimals, e.g. 6 or 18', required: true },
     { name: 'expiration', label: 'expires', hint: '7d, 24h, or blank', required: false },
     { name: 'executionDelay', label: 'delay', hint: 'extra timelock, or blank', required: false },
   ],
@@ -190,11 +195,19 @@ export const FORM_FIELDS: Record<ProposeKind, readonly FormField[]> = {
     { name: 'to', label: 'to', hint: '0x… recipient', required: true },
     { name: 'tokenId', label: 'token id', hint: 'integer token id', required: true },
     { name: 'amount', label: 'amount', hint: 'raw quantity', required: true },
+    { name: 'data', label: 'receiver data', hint: 'optional hex receiver data, default 0x', required: false },
   ],
   call: [
     { name: 'to', label: 'contract', hint: '0x… target contract', required: true },
     { name: 'data', label: 'calldata', hint: '0x… encoded calldata', required: true },
     { name: 'value', label: 'value', hint: 'QUAI, blank for zero', required: false },
+  ],
+  'abi-call': [
+    { name: 'to', label: 'to', hint: 'target contract address', required: true },
+    { name: 'abi', label: 'ABI file', hint: 'path to a local JSON ABI file', required: true },
+    { name: 'function', label: 'function', hint: 'function name or full signature', required: true },
+    { name: 'argsJson', label: 'arguments', hint: 'JSON array, default []', required: false },
+    { name: 'value', label: 'value', hint: 'QUAI to send, default 0', required: false },
   ],
   batch: [
     { name: 'request', label: 'request file', hint: 'path to batch JSON', required: true },
@@ -257,6 +270,15 @@ export const FORM_FIELDS: Record<ProposeKind, readonly FormField[]> = {
   ],
 };
 
+for (const [kind, fields] of Object.entries(FORM_FIELDS)) {
+  if (kind === 'create-vault' || kind === 'initiate-recovery') continue;
+  for (const field of [
+    { name: 'expiration', label: 'expires', hint: '7d, 24h, or blank for never', required: false },
+    { name: 'executionDelay', label: 'delay', hint: 'extra timelock, or blank', required: false },
+    { name: 'idempotencyKey', label: 'retry key', hint: 'optional unique key to prevent duplicate proposals', required: false },
+  ]) if (!fields.some((f) => f.name === field.name)) FORM_FIELDS[kind as ProposeKind] = [...FORM_FIELDS[kind as ProposeKind], field];
+}
+
 export const PROPOSE_KINDS = Object.keys(FORM_FIELDS) as ProposeKind[];
 
 export interface FormState {
@@ -265,6 +287,7 @@ export interface FormState {
   field: number;
   values: Record<string, string>;
   error?: string;
+  cursor?: number;
 }
 
 export function initialForm(kind: ProposeKind = 'transfer'): FormState {
@@ -272,6 +295,11 @@ export function initialForm(kind: ProposeKind = 'transfer'): FormState {
 }
 
 // ------------------------------------------------------------------- state
+
+export const HISTORY_KINDS = ['transactions', 'deposits', 'transfers', 'recoveries'] as const;
+export type HistoryKind = typeof HISTORY_KINDS[number];
+export interface HistoryRecord { title: string; lines: string[] }
+export interface HistoryRecords { records: HistoryRecord[]; hasMore: boolean }
 
 export interface TuiState {
   pane: Pane;
@@ -301,18 +329,35 @@ export interface TuiState {
   lastSignResult: { ok: boolean; message: string } | null;
   form: FormState;
   quit: boolean;
+  help: boolean;
+  query: string;
+  searching: boolean;
+  bodyScroll: number;
+  bodyRows: number;
+  policyCursor?: number;
+  policyError?: string;
+  scopedError?: string;
+  historyHasMore: boolean;
+  historyKind: HistoryKind;
+  historyRecords: Partial<Record<HistoryKind, HistoryRecords>>;
+  recoveries: RecoveryDetail[];
+  recoveryIndex: number;
 }
 
 export type TuiEvent =
   | { type: 'key'; key: string }
   | { type: 'paste'; text: string }
   | { type: 'resize'; rows: number }
-  | { type: 'data'; rows: TuiRow[]; degraded: boolean; at: number }
+  | { type: 'data'; rows: TuiRow[]; degraded: boolean; at: number; warning?: string }
   | { type: 'vaults'; vaults: VaultSummary[] }
-  | { type: 'history'; rows: TuiRow[] }
-  | { type: 'vault-detail'; detail: VaultDetail | null }
-  | { type: 'recovery-module'; detail: RecoveryModuleDetail | null }
-  | { type: 'recovery'; detail: RecoveryDetail | null }
+  | { type: 'history'; rows: TuiRow[]; address?: string; hasMore?: boolean }
+  | { type: 'vault-detail'; address?: string; detail: VaultDetail | null }
+  | { type: 'recovery-module'; address?: string; detail: RecoveryModuleDetail | null }
+  | { type: 'recovery'; address?: string; detail: RecoveryDetail | null }
+  | { type: 'history-records'; address: string; kind: HistoryKind; page: HistoryRecords }
+  | { type: 'body-size'; rows: number }
+  | { type: 'scoped-error'; address: string; message?: string }
+  | { type: 'recoveries'; address: string; details: RecoveryDetail[] }
   | { type: 'open-form'; kind: ProposeKind }
   | { type: 'policy'; lines: PolicyLine[] | null }
   | { type: 'policy-edit'; value: string | null }
@@ -325,14 +370,16 @@ export type TuiEvent =
 /** Bounded so a busy vault cannot grow the activity log without limit. */
 export const ACTIVITY_LIMIT = 200;
 
-/**
- * Longest value a field will hold.
- *
- * Typing is self-limiting; a paste is not, and the clipboard can hold a
- * megabyte. The longest thing any field legitimately takes is a 42-character
- * address, so this is generous rather than tight.
- */
+/** Bounded inputs, with room for calldata, file paths and address lists. */
 export const MAX_FIELD_LENGTH = 128;
+export const MAX_POLICY_LENGTH = 8192;
+export function fieldLimit(name: string): number {
+  if (name === 'data') return 65538;
+  if (name === 'request' || name === 'abi') return 4096;
+  if (name === 'argsJson') return 32768;
+  if (name === 'owners' || name === 'guardians') return 8192;
+  return MAX_FIELD_LENGTH;
+}
 
 /**
  * Control and format characters, stripped from anything pasted.
@@ -369,15 +416,20 @@ export function initialState(viewport = 10): TuiState {
     signing: null,
     lastSignResult: null,
     form: initialForm(),
-    quit: false,
+    quit: false, help: false, query: '', searching: false, bodyScroll: 0, bodyRows: 0,
+    historyHasMore: false, historyKind: 'transactions', historyRecords: {}, recoveries: [], recoveryIndex: 0,
   };
 }
 
 /** The list the current pane is navigating, if it navigates one at all. */
 export function activeList(state: TuiState): TuiRow[] {
-  if (state.pane === 'history') return state.history;
-  if (state.pane === 'inbox') return state.rows;
-  return [];
+  const rows = state.pane === 'history' && state.historyKind === 'transactions' ? state.history : state.pane === 'inbox' ? state.rows : [];
+  return filterRows(rows, state.query);
+}
+
+function filterRows(rows: TuiRow[], query: string): TuiRow[] {
+  const q = query.trim().toLowerCase();
+  return q ? rows.filter((r) => [r.vaultLabel, r.vault, r.tx.hash, r.tx.to, r.tx.summary, r.tx.status].some((v) => v.toLowerCase().includes(q))) : rows;
 }
 
 /**
@@ -397,9 +449,9 @@ function reselect(
   after: readonly TuiRow[],
 ): number {
   if (state.pane !== pane) return state.selected;
-  const anchor = before[state.selected]?.tx.hash;
-  const moved = anchor ? after.findIndex((r) => r.tx.hash === anchor) : -1;
-  return moved >= 0 ? moved : Math.min(state.selected, Math.max(0, after.length - 1));
+  const anchor = filterRows([...before], state.query)[state.selected];
+  const moved = anchor ? filterRows([...after], state.query).findIndex((r) => sameRow(r, anchor)) : -1;
+  return moved >= 0 ? moved : Math.min(state.selected, Math.max(0, filterRows([...after], state.query).length - 1));
 }
 
 function clampScroll(state: TuiState): TuiState {
@@ -412,8 +464,26 @@ function clampScroll(state: TuiState): TuiState {
   return next === scroll ? state : { ...state, scroll: next };
 }
 
+function sameRow(a: TuiRow, b: TuiRow): boolean {
+  return a.tx.hash === b.tx.hash && a.vault.toLowerCase() === b.vault.toLowerCase();
+}
+
 export function reduce(state: TuiState, event: TuiEvent): TuiState {
+  if ('address' in event && event.address &&
+      event.address.toLowerCase() !== selectedVault(state)?.address.toLowerCase()) return state;
   switch (event.type) {
+    case 'history-records': return { ...state, historyRecords: { ...state.historyRecords, [event.kind]: event.page } };
+    case 'body-size': {
+      const bodyScroll = Math.min(state.bodyScroll, Math.max(0, event.rows - state.viewport));
+      return state.bodyRows === event.rows && state.bodyScroll === bodyScroll ? state :
+        { ...state, bodyRows: event.rows, bodyScroll };
+    }
+    case 'scoped-error': return { ...state, scopedError: event.message };
+    case 'recoveries': {
+      const index = state.recovery ? event.details.findIndex((r) => r.hash === state.recovery?.hash) :
+        state.recoveryIndex < 0 ? -1 : 0;
+      return { ...state, recoveries: event.details, recoveryIndex: index, recovery: event.details[index] ?? null };
+    }
     case 'loading':
       return { ...state, load: { ...state.load, status: 'loading' } };
 
@@ -423,9 +493,10 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
         ...state,
         rows: event.rows,
         selected,
+        detail: state.detail && (state.pane !== 'inbox' || event.rows.some((r) => selectedRow(state) && sameRow(r, selectedRow(state)!))),
         // "no results" and "cannot see results" are different things, and the
         // difference must survive a refresh.
-        load: { status: event.degraded ? 'degraded' : 'ok', fetchedAt: event.at },
+        load: { status: event.degraded ? 'degraded' : 'ok', fetchedAt: event.at, error: event.warning },
       });
     }
 
@@ -442,6 +513,8 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
         : -1;
       return {
         ...state,
+        ...(anchor && moved < 0 ? { vaultDetail: null, recoveryModule: null, recovery: null,
+          recoveries: [], recoveryIndex: 0, history: [], historyHasMore: false, historyRecords: {}, detail: false } : {}),
         vaults: event.vaults,
         selectedVault:
           moved >= 0 ? moved : Math.min(state.selectedVault, Math.max(0, event.vaults.length - 1)),
@@ -452,6 +525,8 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
       return clampScroll({
         ...state,
         history: event.rows,
+        historyHasMore: event.hasMore ?? false,
+        detail: state.detail && (state.pane !== 'history' || event.rows.some((r) => selectedRow(state) && sameRow(r, selectedRow(state)!))),
         selected: reselect(state, 'history', state.history, event.rows),
       });
 
@@ -471,7 +546,7 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
         detail: false,
         selected: 0,
         scroll: 0,
-        form: { ...initialForm(event.kind), field: 0 },
+        form: { ...initialForm(event.kind), field: 0, cursor: undefined },
       };
 
     case 'policy':
@@ -482,7 +557,7 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
       };
 
     case 'policy-edit':
-      return { ...state, policyEdit: event.value };
+      return { ...state, policyEdit: event.value, policyCursor: undefined, policyError: undefined };
 
     case 'activity':
       return { ...state, activity: [event.entry, ...state.activity].slice(0, ACTIVITY_LIMIT) };
@@ -527,7 +602,7 @@ const KIND_SELECTOR_KEYS = new Set(['left', 'right', 'h', 'l', 'return', 'down',
 function cyclePane(state: TuiState, direction: 1 | -1): TuiState {
   const at = PANES.indexOf(state.pane);
   const next = PANES[(at + direction + PANES.length) % PANES.length] as Pane;
-  return clampScroll({ ...state, pane: next, detail: false, selected: 0, scroll: 0 });
+  return clampScroll({ ...state, pane: next, detail: false, selected: 0, scroll: 0, bodyScroll: 0, query: '', searching: false });
 }
 
 /**
@@ -550,6 +625,7 @@ function selectVault(state: TuiState, direction: 1 | -1): TuiState {
   return clampScroll({
     ...state,
     selectedVault: next,
+    bodyScroll: 0, scopedError: undefined, historyHasMore: false, historyRecords: {}, recoveries: [], recoveryIndex: 0,
     detail: false,
     selected: state.pane === 'inbox' ? state.selected : 0,
     scroll: state.pane === 'inbox' ? state.scroll : 0,
@@ -563,6 +639,17 @@ function selectVault(state: TuiState, direction: 1 | -1): TuiState {
 function reduceKey(state: TuiState, key: string): TuiState {
   // While a spawned signer owns the terminal, the TUI ignores input entirely.
   if (state.signing) return state;
+  if (state.help) {
+    if (['?', 'escape', 'q'].includes(key)) return { ...state, help: false, bodyScroll: 0 };
+    return scrollBody(state, key);
+  }
+  if (state.searching) {
+    if (key === 'return') return { ...state, searching: false };
+    if (key === 'escape') return { ...state, searching: false, query: '', selected: 0, scroll: 0 };
+    const query = key === 'backspace' ? Array.from(state.query).slice(0, -1).join('') :
+      key === 'ctrl-u' ? '' : Array.from(key).length === 1 && !/[\p{Cc}\p{Cf}]/u.test(key) ? (state.query + key).slice(0, 128) : state.query;
+    return { ...state, query, selected: 0, scroll: 0 };
+  }
 
   // The propose pane is a text form, so printable characters are content
   // rather than commands — but **only once a field is focused**. On the kind
@@ -583,6 +670,22 @@ function reduceKey(state: TuiState, key: string): TuiState {
     if (handled) return handled;
   }
 
+  if (key === '?') return { ...state, help: true, bodyScroll: 0 };
+  if (/^[1-8]$/.test(key)) return { ...state, pane: PANES[Number(key) - 1]!, detail: false, selected: 0, scroll: 0, bodyScroll: 0, query: '' };
+  if (key === '/' && !state.detail && (state.pane === 'inbox' || (state.pane === 'history' && state.historyKind === 'transactions'))) return { ...state, searching: true };
+  if (state.pane === 'history' && !state.detail && ['left', 'right'].includes(key)) {
+    const index = (HISTORY_KINDS.indexOf(state.historyKind) + (key === 'right' ? 1 : -1) + HISTORY_KINDS.length) % HISTORY_KINDS.length;
+    return { ...state, historyKind: HISTORY_KINDS[index]!, query: '', searching: false, selected: 0, scroll: 0, bodyScroll: 0 };
+  }
+  if (state.pane === 'recovery' && !state.detail && ['left', 'right'].includes(key) && state.recoveries.length) {
+    const recoveryIndex = (state.recoveryIndex + (key === 'right' ? 1 : -1) + state.recoveries.length) % state.recoveries.length;
+    return { ...state, recoveryIndex, recovery: state.recoveries[recoveryIndex]!, bodyScroll: 0 };
+  }
+  if (state.detail || (state.pane === 'history' && state.historyKind !== 'transactions') || !['inbox', 'history', 'propose', 'policy'].includes(state.pane)) {
+    const scrolled = scrollBody(state, key);
+    if (scrolled !== state) return scrolled;
+    if (['j', 'k', 'up', 'down', 'g', 'G', 'home', 'end', 'page-up', 'page-down'].includes(key)) return state;
+  }
   switch (key) {
     case 'tab':
       return cyclePane(state, 1);
@@ -601,17 +704,23 @@ function reduceKey(state: TuiState, key: string): TuiState {
     case 'k':
     case 'up':
       return clampScroll({ ...state, selected: Math.max(0, state.selected - 1) });
+    case 'home':
     case 'g':
       return clampScroll({ ...state, selected: 0 });
+    case 'end':
     case 'G':
       return clampScroll({ ...state, selected: Math.max(0, activeList(state).length - 1) });
+    case 'page-down':
+      return clampScroll({ ...state, selected: Math.min(state.selected + state.viewport, Math.max(0, activeList(state).length - 1)) });
+    case 'page-up':
+      return clampScroll({ ...state, selected: Math.max(0, state.selected - state.viewport) });
     case '[':
       return selectVault(state, -1);
     case ']':
       return selectVault(state, 1);
     case 'return':
     case 'l':
-      return activeList(state).length ? { ...state, detail: true } : state;
+      return activeList(state).length ? { ...state, detail: true, bodyScroll: 0 } : state;
     default:
       return state;
   }
@@ -629,21 +738,9 @@ function reducePolicy(state: TuiState, key: string): TuiState | null {
   const lines = state.policy ?? [];
 
   if (state.policyEdit !== null) {
-    switch (key) {
-      case 'escape':
-        return { ...state, policyEdit: null };
-      case 'return':
-        // The App reads the buffer and spawns `qv policy set`. Leaving the
-        // state alone here means a failed write does not silently look applied.
-        return state;
-      case 'backspace':
-        return { ...state, policyEdit: state.policyEdit.slice(0, -1) };
-      case 'ctrl-u':
-        return { ...state, policyEdit: '' };
-      default:
-        if (key.length !== 1 || key < ' ') return state;
-        return { ...state, policyEdit: state.policyEdit + key };
-    }
+    if (key === 'escape') return { ...state, policyEdit: null, policyCursor: undefined, policyError: undefined };
+    if (key === 'return') return state;
+    return editPolicy(state, key);
   }
 
   switch (key) {
@@ -655,7 +752,7 @@ function reducePolicy(state: TuiState, key: string): TuiState | null {
       return { ...state, policyField: Math.max(0, state.policyField - 1) };
     case 'e':
     case 'return':
-      return lines.length ? { ...state, policyEdit: lines[state.policyField]?.value ?? '' } : state;
+      return lines.length ? { ...state, policyEdit: lines[state.policyField]?.value ?? '', policyCursor: undefined, policyError: undefined } : state;
     default:
       return null;
   }
@@ -692,7 +789,7 @@ function reduceForm(state: TuiState, key: string): TuiState {
       }
       case 'return':
       case 'down':
-        return { ...state, form: { ...state.form, field: 0 } };
+        return { ...state, form: { ...state.form, field: 0, cursor: undefined } };
       default:
         return state;
     }
@@ -701,51 +798,50 @@ function reduceForm(state: TuiState, key: string): TuiState {
   switch (key) {
     case 'tab':
     case 'down':
-      return { ...state, form: { ...state.form, field: Math.min(field + 1, fields.length - 1) } };
+      return { ...state, form: { ...state.form, field: Math.min(field + 1, fields.length - 1), cursor: undefined } };
     case 'shift-tab':
     case 'up':
-      return { ...state, form: { ...state.form, field: Math.max(-1, field - 1) } };
+      return { ...state, form: { ...state.form, field: Math.max(-1, field - 1), cursor: undefined } };
     case 'return':
       // Enter on the last field is the submit gesture; the caller reads
       // `formArgv` and spawns. Anywhere else it advances.
       return field >= fields.length - 1
         ? state
-        : { ...state, form: { ...state.form, field: field + 1 } };
-    case 'backspace': {
-      const name = fields[field]!.name;
-      const current = state.form.values[name] ?? '';
-      return {
-        ...state,
-        form: {
-          ...state.form,
-          values: { ...state.form.values, [name]: current.slice(0, -1) },
-          error: undefined,
-        },
-      };
-    }
-    case 'ctrl-u': {
-      const name = fields[field]!.name;
-      return {
-        ...state,
-        form: { ...state.form, values: { ...state.form.values, [name]: '' }, error: undefined },
-      };
-    }
-    default: {
-      // Printable single characters are content. Anything longer is a key name
-      // we do not handle, and must not be typed into the field.
-      if (key.length !== 1 || key < ' ') return state;
-      const name = fields[field]!.name;
-      const current = state.form.values[name] ?? '';
-      return {
-        ...state,
-        form: {
-          ...state.form,
-          values: { ...state.form.values, [name]: current + key },
-          error: undefined,
-        },
-      };
-    }
+        : { ...state, form: { ...state.form, field: field + 1, cursor: undefined } };
+    default: return editForm(state, key);
   }
+}
+
+function scrollBody(state: TuiState, key: string): TuiState {
+  const max = Math.max(0, state.bodyRows - state.viewport);
+  const delta = ['j', 'down'].includes(key) ? 1 : ['k', 'up'].includes(key) ? -1 :
+    key === 'page-down' ? state.viewport : key === 'page-up' ? -state.viewport : 0;
+  const bodyScroll = ['g', 'home'].includes(key) ? 0 : ['G', 'end'].includes(key) ? max :
+    Math.max(0, Math.min(max, state.bodyScroll + delta));
+  return bodyScroll === state.bodyScroll ? state : { ...state, bodyScroll };
+}
+
+function printable(key: string): string | undefined {
+  return Array.from(key).length === 1 && !/[\p{Cc}\p{Cf}]/u.test(key) ? key : undefined;
+}
+function editForm(state: TuiState, key: string, pasted?: string): TuiState {
+  const field = FORM_FIELDS[state.form.kind][state.form.field];
+  if (!field) return state;
+  const insert = pasted ?? printable(key);
+  if (insert === undefined && !EDIT_KEYS.has(key)) return state;
+  const next = editText(state.form.values[field.name] ?? '', state.form.cursor, key, insert);
+  const limit = fieldLimit(field.name);
+  if (next.value.length > limit) return { ...state, form: { ...state.form,
+    error: `Input too long for ${field.label} (max ${limit} characters) — nothing was inserted` } };
+  return { ...state, form: { ...state.form, cursor: next.cursor,
+    values: { ...state.form.values, [field.name]: next.value }, error: undefined } };
+}
+function editPolicy(state: TuiState, key: string, pasted?: string): TuiState {
+  const insert = pasted ?? printable(key);
+  if (insert === undefined && !EDIT_KEYS.has(key)) return state;
+  const next = editText(state.policyEdit ?? '', state.policyCursor, key, insert);
+  if (next.value.length > MAX_POLICY_LENGTH) return { ...state, policyError: `Input too long (max ${MAX_POLICY_LENGTH} characters) — nothing was inserted` };
+  return { ...state, policyEdit: next.value, policyCursor: next.cursor, policyError: undefined };
 }
 
 /**
@@ -762,44 +858,13 @@ function reduceForm(state: TuiState, key: string): TuiState {
 function reducePaste(state: TuiState, text: string): TuiState {
   if (state.signing) return state;
 
-  // The policy edit buffer takes a paste too — `allow_to` is a list of
-  // addresses, which nobody types either.
-  if (state.pane === 'policy' && !state.detail && state.policyEdit !== null) {
-    const cleaned = text.replace(CONTROL_OR_FORMAT, '').trim();
-    if (!cleaned) return state;
-    const next = state.policyEdit + cleaned;
-    return next.length > MAX_FIELD_LENGTH ? state : { ...state, policyEdit: next };
-  }
-
-  if (state.pane !== 'propose' || state.detail || state.form.field < 0) return state;
-
-  const field = FORM_FIELDS[state.form.kind][state.form.field];
-  if (!field) return state;
-
+  if (state.help) return state;
   const cleaned = text.replace(CONTROL_OR_FORMAT, '').trim();
   if (!cleaned) return state;
-
-  const next = (state.form.values[field.name] ?? '') + cleaned;
-  if (next.length > MAX_FIELD_LENGTH) {
-    // Refused, not truncated. A silently shortened address is still a
-    // plausible-looking address, and this form feeds `qv propose`.
-    return {
-      ...state,
-      form: {
-        ...state.form,
-        error: `that paste is too long for ${field.label} (max ${MAX_FIELD_LENGTH} characters) — nothing was inserted`,
-      },
-    };
-  }
-
-  return {
-    ...state,
-    form: {
-      ...state.form,
-      values: { ...state.form.values, [field.name]: next },
-      error: undefined,
-    },
-  };
+  if (state.searching) return { ...state, query: (state.query + cleaned).slice(0, 128), selected: 0, scroll: 0 };
+  if (state.pane === 'policy' && !state.detail && state.policyEdit !== null) return editPolicy(state, '', cleaned);
+  if (state.pane !== 'propose' || state.detail || state.form.field < 0) return state;
+  return editForm(state, '', cleaned);
 }
 
 /** Fields the form still needs before it can be submitted. */
@@ -848,7 +913,7 @@ export function formArgv(form: FormState, vault: string): string[] | null {
       v('threshold'),
     ];
   }
-  const argv: string[] = ['propose', form.kind, vault];
+  const argv: string[] = ['propose', form.kind === 'abi-call' ? 'call' : form.kind, vault];
 
   switch (form.kind) {
     case 'transfer':
@@ -856,15 +921,22 @@ export function formArgv(form: FormState, vault: string): string[] | null {
       break;
     case 'token':
       argv.push('--token', v('token'), '--to', v('to'), '--amount', v('amount'));
+      if (v('decimals')) argv.push('--decimals', v('decimals'));
       break;
     case 'nft':
       argv.push('--token', v('token'), '--to', v('to'), '--token-id', v('tokenId'));
       break;
     case 'erc1155':
       argv.push('--token', v('token'), '--to', v('to'), '--token-id', v('tokenId'), '--amount', v('amount'));
+      if (v('data')) argv.push('--data', v('data'));
       break;
     case 'call':
       argv.push('--to', v('to'), '--data', v('data'));
+      if (v('value')) argv.push('--value', v('value'));
+      break;
+    case 'abi-call':
+      argv.push('--to', v('to'), '--abi', v('abi'), '--function', v('function'));
+      if (v('argsJson')) argv.push('--args-json', v('argsJson'));
       if (v('value')) argv.push('--value', v('value'));
       break;
     case 'batch':
@@ -922,6 +994,7 @@ export function formArgv(form: FormState, vault: string): string[] | null {
     }
   }
 
+  if (v('idempotencyKey')) argv.push('--idempotency-key', v('idempotencyKey'));
   if (v('expiration')) argv.push('--expiration', v('expiration'));
   if (v('executionDelay')) argv.push('--execution-delay', v('executionDelay'));
   return argv;

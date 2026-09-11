@@ -288,17 +288,16 @@ describe('ActivityPane and HistoryPane', () => {
 });
 
 describe('ProposePane', () => {
-  it('shows every kind with one selected', () => {
+  it('shows the current kind and selection controls without a wrapping catalogue', () => {
     const out = strip(renderToString(<ProposePane state={{ ...initialState(10), pane: 'propose' }} />));
     expect(out).toContain('transfer');
-    expect(out).toContain('token');
-    expect(out).toContain('add-owner');
-    expect(out).toContain('(•)');
+    expect(out).toContain('1/18');
+    expect(out).toContain('←/→');
   });
 
   it('lists what is still missing rather than silently refusing', () => {
     const out = strip(renderToString(<ProposePane state={{ ...initialState(10), pane: 'propose' }} />));
-    expect(out).toMatch(/needs: to, amount/);
+    expect(out).toMatch(/Needs: to, amount/);
   });
 
   it('promises the disclosure once the form is complete', () => {
@@ -309,8 +308,7 @@ describe('ProposePane', () => {
       form: { kind: 'transfer', field: 1, values: { to: ADDR.bob, amount: '1' } },
     };
     const out = strip(renderToString(<ProposePane state={state} />));
-    expect(out).toMatch(/re-reads the chain/);
-    expect(out).toMatch(/before anything is signed/);
+    expect(out).toMatch(/review before signing/);
   });
 });
 

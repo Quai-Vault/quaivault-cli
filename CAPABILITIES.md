@@ -16,17 +16,17 @@ This is the current product contract. `PLAN.md` remains the architectural design
 
 | Capability | One-shot | TUI |
 |---|---|---|
-| Vault discovery/detail/receive | `vault ls/show/receive` | inbox, vault panes |
+| Vault discovery/detail/receive | `vault ls/show/receive` | inbox, vault panes with full receive address |
 | Vault creation | `vault create` | create-vault form |
 | Native/ERC-20/ERC-721/ERC-1155 proposals | `propose transfer/token/nft/erc1155` | proposal forms |
-| Raw and ABI-assisted calls | `propose call` | raw-call form; ABI workflow remains one-shot |
+| Raw and ABI-assisted calls | `propose call` | raw-call and ABI-file/function/JSON-argument forms |
 | Atomic batches | `propose batch --request` | batch request form |
 | Owner/threshold/timelock/module/delegatecall administration | `propose *` | proposal forms |
 | EIP-1271 sign/unsign | `propose sign-message [--unsign]` | proposal form |
 | Social recovery module detail/enable/disable/setup | `recovery status`, `propose enable-recovery`, `propose disable-recovery`, `propose setup-recovery` | module/config detail plus contextual enable/disable/setup flow |
-| Recovery initiate/approve/unapprove/execute/cancel/expire | `recovery *` | initiate form and contextual actions |
+| Recovery initiate/approve/unapprove/execute/cancel/expire | `recovery *` | initiate form, request selector, and contextual actions |
 | Native/token/NFT holdings | `balance --nfts` | assets pane |
-| Transaction/recovery/deposit/token-transfer history | `tx history`, `recovery history`, `activity *` | history and activity panes |
+| Transaction/recovery/deposit/token-transfer history | `tx history`, `recovery history`, `activity *` | paged history categories and live activity pane |
 | Transaction approve/unapprove/execute/cancel/expire | `tx *` | contextual actions |
 | Key, alias, contact, policy, diagnostics | one-shot | policy where appropriate; secret-bearing key operations intentionally excluded |
 

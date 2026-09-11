@@ -328,8 +328,8 @@ describe('formArgv — the security boundary', () => {
   });
 
   it('builds each kind with the flags its command actually takes', () => {
-    expect(formArgv(filled('token', { token: ADDR.token, to: ADDR.bob, amount: '42' }), ADDR.vault)).toEqual(
-      ['propose', 'token', ADDR.vault, '--token', ADDR.token, '--to', ADDR.bob, '--amount', '42'],
+    expect(formArgv(filled('token', { token: ADDR.token, to: ADDR.bob, amount: '42', decimals: '6' }), ADDR.vault)).toEqual(
+      ['propose', 'token', ADDR.vault, '--token', ADDR.token, '--to', ADDR.bob, '--amount', '42', '--decimals', '6'],
     );
     expect(formArgv(filled('add-owner', { owner: ADDR.carol }), ADDR.vault)).toEqual([
       'propose',
@@ -384,7 +384,7 @@ describe('mapKey', () => {
     expect(mapKey('', { leftArrow: true })).toBe('left');
     expect(mapKey('', { rightArrow: true })).toBe('right');
     expect(mapKey('', { backspace: true })).toBe('backspace');
-    expect(mapKey('', { delete: true })).toBe('backspace');
+    expect(mapKey('', { delete: true })).toBe('delete');
     expect(mapKey('u', { ctrl: true })).toBe('ctrl-u');
   });
 

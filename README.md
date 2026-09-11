@@ -76,6 +76,52 @@ qv recovery status <vault> --json
 threshold, recovery period, and pending requests. In the TUI recovery pane, `s` opens
 the applicable enable or guardian-setup flow; `d` proposes disabling an enabled module.
 
+## Terminal workspace
+
+CLI 0.7.0 provides eight panes: inbox, history, activity, assets, vault, recovery,
+policy, and proposals. Start with `qv tui --profile <name> --as <address>`.
+The active profile and identity are preserved when a command opens for signing.
+
+| Keys | Action |
+|---|---|
+| `Tab` / `Shift-Tab`, `1`–`8` | Change pane |
+| `[` / `]` | Change vault |
+| Arrows or `j` / `k`, `PgUp` / `PgDn`, `Home` / `End` | Navigate lists and scroll full details |
+| `/`, then `Enter`; `Esc` | Filter inbox/transaction history; clear search |
+| `Enter` | Open transaction details |
+| `←` / `→` in history | Transactions, deposits, token transfers, recovery history |
+| `m` in history | Load the next 50 records |
+| `←` / `→` in recovery | Choose a pending recovery request |
+| `r`, `?`, `q` | Refresh, keyboard guide, back/quit |
+
+Proposal forms support native and token transfers, raw and ABI-assisted calls,
+batches, vault administration, message signatures, vault creation, and recovery.
+Token forms require explicit decimals. Every proposal form includes expiry,
+execution delay, and an optional idempotency key. Paste calldata, address lists,
+or file paths normally; oversized inputs are rejected with a visible message.
+
+Within a field, use arrows, Home/End, Backspace/Delete, Ctrl-U (clear), Ctrl-W
+(delete word), and Ctrl-K (delete to end). Tab/Shift-Tab changes fields. Enter
+advances until the last field, where it opens the command for review. The result
+stays visible until you press a key, so transaction hashes can be copied.
+
+The display adapts to terminal resizing down to 40 columns × 12 rows. Kitty's
+keyboard protocol is detected through Ink; unsupported terminals use standard
+input. No special font or Kitty configuration is required. Mouse reporting is
+left off so normal terminal text selection remains available. `--color never`
+and `NO_COLOR` support monochrome terminals. Use a larger window for long tables.
+
+Discovery and pending lists page beyond the SDK's defaults. Each is bounded at
+1,000 records per role/vault, with a visible warning if that bound is reached.
+History loads on demand. Indexed lists are not an atomic chain snapshot; the
+one-shot command rereads chain state before signing. Failed reads stay visibly
+unavailable or stale, and delayed responses cannot overwrite another vault.
+
+For the terminal regression suite on Linux/macOS, install `pyte==0.8.2` and
+`wcwidth==0.8.3` in a Python environment, then run `npm run test:tui-pty`.
+`QV_TUI_PYTHON` can select that interpreter; `QV_TUI_CAPTURE_DIR` saves synthetic
+screen captures. The suite tests PTYs and protocol responses, not GUI terminal apps.
+
 ## Before you sign
 
 Every write prints a disclosure read **from chain**, not the indexer:

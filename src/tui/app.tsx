@@ -1,10 +1,15 @@
-import { Box, Text, useApp, useInput, usePaste, useStdout, useWindowSize } from 'ink';
-import { useEffect, useReducer, useRef } from 'react';
+import { Box, Text, useApp, useInput, usePaste, useStdout, useWindowSize, measureElement, type DOMElement } from 'ink';
+import { useEffect, useLayoutEffect, useReducer, useRef } from 'react';
+import { fit } from './text.js';
 import { safeText } from '../format/index.js';
 import type { TuiEnv } from './env.js';
 import { mapKey, pastedText } from './keys.js';
 import {
   PANES,
+  FORM_FIELDS,
+  HISTORY_KINDS,
+  type HistoryKind,
+  activeList,
   formArgv,
   initialState,
   reduce,
@@ -46,6 +51,8 @@ export interface AppProps {
    * Re-read only the vault-scoped panes, for a new vault. Optional so tests
    * can render the tree without a data layer.
    */
+  onHistoryKind?: (dispatch: (event: TuiEvent) => void, address: string, kind: HistoryKind) => Promise<void>;
+  onMoreHistory?: (dispatch: (event: TuiEvent) => void, address: string) => Promise<void>;
   onSelectVault?: (dispatch: (event: TuiEvent) => void, address: string) => Promise<void>;
   /**
    * Hand the terminal to a one-shot child. The caller suspends Ink first, so
@@ -76,13 +83,15 @@ const PANE_LABEL: Record<Pane, string> = {
  * merely ugly — a row you cannot see is a transaction you do not know is
  * waiting.
  */
-export const CHROME_ROWS = 9;
+export const CHROME_ROWS = 8;
 
 export function App({
   env,
   seed,
   onRefresh,
   onSelectVault,
+  onMoreHistory,
+  onHistoryKind,
   onSpawn,
   onSubscribe,
 }: AppProps): React.ReactElement {
@@ -92,6 +101,7 @@ export function App({
   const [state, dispatch] = useReducer(reduce, seed ?? initialState());
   // While a child owns the terminal we must not act on input at all.
   const busy = useRef(false);
+  const content = useRef<DOMElement>(null);
 
   const rows = size.rows || stdout?.rows || 24;
   const width = size.columns || stdout?.columns || 100;
@@ -99,7 +109,7 @@ export function App({
   // Resize. The reducer has always had this event; nothing ever emitted it,
   // so the viewport was fixed at whatever the terminal was on launch.
   useEffect(() => {
-    dispatch({ type: 'resize', rows: Math.max(3, rows - CHROME_ROWS) });
+    dispatch({ type: 'resize', rows: Math.max(1, rows - CHROME_ROWS) });
   }, [rows]);
 
   useEffect(() => {
@@ -111,20 +121,21 @@ export function App({
    * The vault cursor moved, so the scoped panes are about to describe a
    * different vault. The reducer has already blanked them; this fetches.
    *
-   * The first address is *not* fetched here — `onRefresh` already loaded it,
-   * and firing both would double every read on startup.
+   * This also loads the first selected vault. Global refresh discovers the
+   * vault list; this effect owns initial and subsequent selection changes.
    */
   const vaultAddress = selectedVault(state)?.address;
   const lastVault = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!vaultAddress) return;
-    if (lastVault.current === undefined || lastVault.current === vaultAddress) {
-      lastVault.current = vaultAddress;
-      return;
-    }
+    if (!vaultAddress) { lastVault.current = undefined; return; }
+    if (lastVault.current === vaultAddress) return;
     lastVault.current = vaultAddress;
     void onSelectVault?.(dispatch, vaultAddress);
   }, [vaultAddress, onSelectVault]);
+
+  useLayoutEffect(() => {
+    if (content.current) dispatch({ type: 'body-size', rows: measureElement(content.current).height });
+  });
 
   useEffect(() => {
     if (state.quit) exit();
@@ -156,6 +167,15 @@ export function App({
 
     const mapped = mapKey(input, key);
     if (mapped === null) return;
+    // Overlays and text buffers own their keys; action shortcuts never leak through.
+    if (width < 40 || rows < 12) {
+      if (mapped === 'q') exit();
+      return;
+    }
+    if (state.help || state.searching) {
+      dispatch({ type: 'key', key: mapped });
+      return;
+    }
 
     const row = selectedRow(state);
     const vault = selectedVault(state);
@@ -187,12 +207,13 @@ export function App({
           await suspendTerminal(async () => {
             outcome = await onSpawn(argv);
           });
+        } catch {
+          outcome = { ok: false, message: 'Could not complete the command. Refresh and review before retrying.' };
         } finally {
           dispatch({ type: 'sign-end', ok: outcome.ok, message: outcome.message });
-          await onRefresh(dispatch);
-          busy.current = false;
+          try { await onRefresh(dispatch); } finally { busy.current = false; }
         }
-      })();
+      })().catch(() => dispatch({ type: 'error', message: 'Refresh failed. Press r to retry.' }));
     };
 
     /**
@@ -218,7 +239,7 @@ export function App({
       }
     }
 
-    if (state.pane === 'propose' && mapped === 'return' && state.form.field >= 0) {
+    if (state.pane === 'propose' && mapped === 'return' && state.form.field === FORM_FIELDS[state.form.kind].length - 1) {
       const argv = formArgv(state.form, vault?.address ?? '');
       if (argv) {
         spawn(argv, 'propose', '');
@@ -316,7 +337,17 @@ export function App({
       }
     }
 
-    if (mapped === 'r' && state.pane !== 'propose') {
+    if (state.pane === 'history' && !state.detail && ['left', 'right'].includes(mapped) && vault) {
+      const index = (HISTORY_KINDS.indexOf(state.historyKind) + (mapped === 'right' ? 1 : -1) + HISTORY_KINDS.length) % HISTORY_KINDS.length;
+      dispatch({ type: 'key', key: mapped });
+      void onHistoryKind?.(dispatch, vault.address, HISTORY_KINDS[index]!);
+      return;
+    }
+    if (state.pane === 'history' && !state.detail && mapped === 'm' && (state.historyKind === 'transactions' ? state.historyHasMore : state.historyRecords[state.historyKind]?.hasMore) && vault) {
+      void onMoreHistory?.(dispatch, vault.address);
+      return;
+    }
+    if (mapped === 'r' && !(state.pane === 'propose' && state.form.field >= 0) && state.policyEdit === null) {
       void onRefresh(dispatch);
       return;
     }
@@ -324,23 +355,35 @@ export function App({
     dispatch({ type: 'key', key: mapped });
   });
 
-  const envWithWidth: TuiEnv = { ...env, width };
+  const envWithWidth: TuiEnv = { ...env, width: Math.max(1, width - 4) };
+  const scrollable = state.help || state.detail || (state.pane === 'history' && state.historyKind !== 'transactions') || ['vault', 'assets', 'recovery', 'activity'].includes(state.pane);
+  if (width < 40 || rows < 12) return (
+    <Box width={width} height={rows} flexDirection="column">
+      <Text bold color="cyan">QuaiVault</Text>
+      <Text>Enlarge this terminal to at least 40 columns × 12 rows.</Text>
+      <Text dimColor>q quit · Ctrl-C exit</Text>
+    </Box>
+  );
 
   return (
     <Box flexDirection="column" width={width} height={rows}>
-      <Header state={state} env={envWithWidth} />
-      <Tabs state={state} />
+      <Header state={state} env={{ ...env, width }} />
+      <Tabs state={state} width={width} />
+      <Status state={state} width={width} />
       <Box
-        flexGrow={1}
+        height={rows - 5}
+        flexShrink={0}
         flexDirection="column"
         borderStyle="round"
         borderColor="gray"
         paddingX={1}
         overflow="hidden"
       >
-        <Body state={state} env={envWithWidth} />
+        <Box ref={content} flexDirection="column" flexShrink={0} marginTop={scrollable ? -state.bodyScroll : 0}>
+          <Body state={state} env={envWithWidth} />
+        </Box>
       </Box>
-      <Footer state={state} />
+      <Footer state={state} width={width} />
     </Box>
   );
 }
@@ -359,36 +402,14 @@ function Header({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactEl
   const alarm = state.vaults.some((v) => v.hasRecovery);
   const many = state.vaults.length > 1;
   return (
-    <Box>
-      <Text bold color="cyan">
-        QuaiVault
+    <Box height={1} flexShrink={0}>
+      <Text wrap="truncate-end">
+        <Text bold color="cyan">QuaiVault</Text>
+        <Text dimColor> {safeText(env.profile ?? '', 24)} · </Text>
+        {vault ? <Text bold>{safeText(vault.label, 24)}{many ? ` ${state.selectedVault + 1}/${state.vaults.length}` : ''}</Text> : <Text dimColor>No vault selected</Text>}
+        {alarm ? <Text color="red" bold> · RECOVERY PENDING</Text> : null}
+        {env.width >= 100 ? <Text dimColor> · {safeText(env.identity, 64)}</Text> : null}
       </Text>
-      <Text dimColor> {env.identity}</Text>
-      {vault ? (
-        <>
-          <Text dimColor> · </Text>
-          {many ? <Text dimColor>‹ </Text> : null}
-          <Text bold>{safeText(vault.label, 24)}</Text>
-          {vault.pending > 0 ? <Text color="yellow"> {vault.pending}</Text> : null}
-          {many ? (
-            <Text dimColor>
-              {' '}
-              › {state.selectedVault + 1}/{state.vaults.length}
-            </Text>
-          ) : null}
-        </>
-      ) : null}
-      {state.load.status === 'degraded' ? (
-        <Text color="red"> · indexer unavailable — lists are incomplete, not empty</Text>
-      ) : null}
-      {state.load.status === 'error' ? (
-        <Text color="red"> · refresh failed: {safeText(state.load.error ?? 'unknown error', 120)}</Text>
-      ) : null}
-      {alarm ? (
-        <Text color="red" bold>
-          {'  ⚠ RECOVERY PENDING'}
-        </Text>
-      ) : null}
     </Box>
   );
 }
@@ -400,26 +421,27 @@ function Header({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactEl
  * terminals where `dimColor` is a no-op, colour alone left every tab looking
  * identical and there was no way to tell which pane you were in.
  */
-function Tabs({ state }: { state: TuiState }): React.ReactElement {
-  return (
-    <Box>
-      {PANES.map((p, i) => (
-        <Box key={p}>
-          {i > 0 ? <Text dimColor>│</Text> : null}
-          {p === state.pane ? (
-            <Text inverse bold color="cyan">
-              {` ${PANE_LABEL[p]} `}
-            </Text>
-          ) : (
-            <Text dimColor>{` ${PANE_LABEL[p]} `}</Text>
-          )}
-        </Box>
-      ))}
-    </Box>
-  );
+function Tabs({ state, width }: { state: TuiState; width: number }): React.ReactElement {
+  const index = PANES.indexOf(state.pane);
+  const panes = width >= 100 ? PANES : PANES.slice(Math.max(0, index - 1), Math.max(0, index - 1) + (width >= 60 ? 4 : 2));
+  return <Box height={1} flexShrink={0}>
+    {panes.map((pane) => <Text key={pane} inverse={pane === state.pane} bold={pane === state.pane} dimColor={pane !== state.pane}>
+      {` ${PANES.indexOf(pane) + 1} ${PANE_LABEL[pane]} `}
+    </Text>)}
+  </Box>;
+}
+
+function Status({ state, width }: { state: TuiState; width: number }): React.ReactElement {
+  const error = state.scopedError ?? state.load.error;
+  const text = state.pane === 'history' && !state.searching && !error ? `History: ${state.historyKind} · ←/→ category · m load more` : state.searching ? `Search: ${state.query}▏  Enter apply · Esc clear` : error ??
+    (state.load.status === 'loading' || state.load.status === 'idle' ? 'Refreshing vaults…' :
+      state.load.status === 'degraded' ? 'Indexer unavailable · lists may be incomplete · r retry' :
+      `${state.rows.length} pending · ${state.vaults.length} vaults` + (state.load.fetchedAt ? ` · updated ${new Date(state.load.fetchedAt * 1000).toISOString().slice(11, 19)} UTC` : ''));
+  return <Box height={1} flexShrink={0}><Text color={error || state.load.status === 'degraded' ? 'yellow' : undefined} dimColor={!error && !state.searching}>{fit(text, width)}</Text></Box>;
 }
 
 function Body({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElement {
+  if (state.help) return <HelpPane />;
   if (state.signing) {
     return (
       <Text color="yellow">
@@ -443,9 +465,9 @@ function Body({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElem
     case 'recovery':
       return <RecoveryPane state={state} env={env} />;
     case 'policy':
-      return <PolicyPane state={state} />;
+      return <PolicyPane state={state} env={env} />;
     case 'propose':
-      return <ProposePane state={state} />;
+      return <ProposePane state={state} env={env} />;
     default: {
       const never: never = state.pane;
       throw new Error(`unhandled pane: ${String(never)}`);
@@ -455,6 +477,8 @@ function Body({ state, env }: { state: TuiState; env: TuiEnv }): React.ReactElem
 
 /** The key legend, scoped to what the current pane can actually do. */
 function keyLegend(state: TuiState): string {
+  if (state.help) return '↑/↓ scroll · ?/Esc close help';
+  if (state.searching) return 'type to filter · Enter apply · Esc clear';
   const vaults = state.vaults.length > 1 ? ' · [/] vault' : '';
   if (state.detail) {
     const row = selectedRow(state);
@@ -468,13 +492,13 @@ function keyLegend(state: TuiState): string {
       allowed.has('cancel') ? 'c cancel' : '',
       allowed.has('expire') ? 'e expire' : '',
     ].filter(Boolean);
-    return `${actions.join(' · ')}${actions.length ? ' · ' : ''}q back`;
+    return `${actions.join(' · ')}${actions.length ? ' · ' : ''}↑/↓ scroll · q back`;
   }
   if (state.pane === 'policy') {
     if (state.policyEdit !== null) return 'type to edit · enter apply · ctrl-u clear · esc cancel';
     return `j/k field · e edit · tab pane${vaults} · r refresh · q quit`;
   }
-  if (state.pane === 'propose') return 'tab field · ←/→ kind · enter build · esc leave';
+  if (state.pane === 'propose') return state.form.field < 0 ? '←/→ kind · Enter fill · Tab pane · ? help · q quit' : 'Tab field · ←/→ cursor · Enter next/build · Esc leave';
   if (state.pane === 'recovery') {
     const allowed = new Set(
       (state.recovery?.affordances ?? []).filter((item) => item.allowed).map((item) => item.action),
@@ -491,18 +515,61 @@ function keyLegend(state: TuiState): string {
     ].filter(Boolean).join(' · ');
     return `${actions}${actions ? ' · ' : ''}tab pane${vaults} · r refresh · q quit`;
   }
-  return `tab pane · j/k move · enter open${vaults} · r refresh · q quit`;
+  return `Tab pane · ↑/↓ move · Enter open${vaults} · / find · ? help · q quit`;
 }
 
-function Footer({ state }: { state: TuiState }): React.ReactElement {
-  return (
-    <Box flexDirection="column">
-      <Text dimColor>{keyLegend(state)}</Text>
-      {state.lastSignResult ? (
-        <Text color={state.lastSignResult.ok ? 'green' : 'red'}>
-          {state.lastSignResult.ok ? 'ok' : 'failed'}: {safeText(state.lastSignResult.message, 200)}
-        </Text>
-      ) : null}
-    </Box>
-  );
+function Footer({ state, width }: { state: TuiState; width: number }): React.ReactElement {
+  const list = activeList(state);
+  const scrollable = state.help || state.detail || (state.pane === 'history' && state.historyKind !== 'transactions') || ['vault', 'assets', 'recovery', 'activity'].includes(state.pane);
+  const position = scrollable && state.bodyRows > state.viewport ? `Lines ${state.bodyScroll + 1}–${Math.min(state.bodyScroll + state.viewport, state.bodyRows)}/${state.bodyRows} · PgUp/PgDn scroll` :
+    list.length ? `${state.selected + 1}/${list.length}${state.query ? ` · filter: ${state.query}` : ''}${state.pane === 'history' && state.historyHasMore ? ' · m load more history' : ''}` :
+      '1–8 jump to pane · r refresh · ? all shortcuts';
+  const compact = state.help ? '?/Esc close · ↑/↓ scroll' : state.searching ? 'Enter apply · Esc clear · Ctrl-U erase' :
+    state.pane === 'propose' && state.form.field >= 0 ? 'Esc leave · Tab field · Enter next/build' :
+    state.policyEdit !== null ? 'Esc cancel · Enter apply · Ctrl-U clear' :
+    state.detail ? 'q back · ? help · ↑/↓ scroll' : 'q quit · ? help · Tab pane · ↑/↓ move';
+  return <Box height={2} flexShrink={0} flexDirection="column">
+    <Text dimColor>{fit(width < 80 ? compact : keyLegend(state), width)}</Text>
+    <Text color={state.lastSignResult?.ok === false ? 'red' : undefined} dimColor={!state.lastSignResult}>
+      {fit(state.lastSignResult ? `${state.lastSignResult.ok ? 'ok' : 'failed'}: ${safeText(state.lastSignResult.message, 200)} · ${position}` : position, width)}
+    </Text>
+  </Box>;
+}
+
+function HelpPane(): React.ReactElement {
+  return <Box flexDirection="column">
+    <Text bold color="cyan">Keyboard guide</Text>
+    <Text>Tab / Shift-Tab   Next / previous pane</Text>
+    <Text>1–8              Jump to a pane</Text>
+    <Text>[ / ]            Previous / next vault</Text>
+    <Text>↑/↓ or j/k       Move through lists; scroll details</Text>
+    <Text>PgUp / PgDn      Move one page</Text>
+    <Text>Home / End, g/G  First / last row or line</Text>
+    <Text>/                Search inbox/history; Enter applies</Text>
+    <Text>Esc              Clear search or close details</Text>
+    <Text>Enter            Open selected transaction</Text>
+    <Text>←/→ in history   Transactions / deposits / transfers / recoveries</Text>
+    <Text>m                Load more history</Text>
+    <Text>r                Refresh data</Text>
+    <Text>?                Show / close this guide</Text>
+    <Text>q / Ctrl-C       Back / quit</Text>
+    <Text> </Text>
+    <Text bold>Proposals and policy fields</Text>
+    <Text>←/→              Move cursor (choose kind on selector)</Text>
+    <Text>Home/End         Start / end of field</Text>
+    <Text>Ctrl-U           Clear field</Text>
+    <Text>Ctrl-W / Ctrl-K  Delete word / delete to end</Text>
+    <Text>Tab/Shift-Tab    Next / previous field</Text>
+    <Text>Enter            Next field; build on last field</Text>
+    <Text>Esc              Leave form / cancel policy edit</Text>
+    <Text> </Text>
+    <Text bold>Recovery</Text>
+    <Text>←/→              Previous / next recovery request</Text>
+    <Text>s / d            Configure or enable / disable</Text>
+    <Text>a / u / x        Approve / unapprove / execute</Text>
+    <Text>c / e            Cancel / expire when permitted</Text>
+    <Text> </Text>
+    <Text>Each write opens a separate command for review and confirmation.</Text>
+    <Text>Paste uses your terminal’s normal shortcut. Mouse selection stays available.</Text>
+  </Box>;
 }

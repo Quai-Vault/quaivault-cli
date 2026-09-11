@@ -157,6 +157,9 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
       },
       affordances: (hash: string) => Promise.resolve(st.affordances[hash] ?? []),
       balances: () => Promise.resolve({ native: st.info.balance, tokens: [] }),
+      delegatecallTargets: () => Promise.resolve([]),
+      deposits: () => Promise.resolve(page([])),
+      tokenTransfers: () => Promise.resolve(page([])),
       signedMessages: () => Promise.resolve([]),
       propose: {
         transfer: (params: { to: string; amount: bigint; dryRun?: boolean }) =>
@@ -252,6 +255,7 @@ export function createFakeClient(opts: FakeOptions = {}): QuaiVaultClient {
         },
       },
       recovery: {
+        history: () => Promise.resolve([]),
         isEnabled: () => Promise.resolve(st.recoveryEnabled),
         config: () => Promise.resolve(st.recoveryConfig),
         hasPending: () => Promise.resolve(st.hasPendingRecovery),

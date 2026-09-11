@@ -8,6 +8,8 @@ import { ChangeFeed } from '../store/index.js';
 import { planChannels, type ChannelPlan } from '../store/channels.js';
 import type { TuiEnv } from '../tui/env.js';
 import type {
+  HistoryKind,
+  HistoryRecord,
   PolicyLine,
   RecoveryDetail,
   RecoveryModuleDetail,
@@ -15,7 +17,8 @@ import type {
   TuiRow,
   VaultSummary,
 } from '../tui/reducer.js';
-import { holdUntilAcknowledged, spawnSigner } from '../tui/spawn-signer.js';
+import { latestRequest } from '../tui/requests.js';
+import { holdUntilAcknowledged, signerArgv, spawnSigner } from '../tui/spawn-signer.js';
 
 /**
  * `qv tui` — a full-screen monitoring and review surface.
@@ -52,12 +55,23 @@ function labelFor(ctx: AppContext, address: string): string {
 }
 
 /** Vaults the identity touches. */
-async function loadVaults(ctx: AppContext, identity: string): Promise<string[]> {
+async function loadVaults(ctx: AppContext, identity: string): Promise<{ vaults: string[]; truncated: boolean }> {
   const [owned, guardian] = await Promise.all([
-    ctx.qv.vaults.forOwner(identity),
-    ctx.qv.vaults.forGuardian(identity),
+    addressPages((offset) => ctx.qv.vaults.forOwner(identity, { limit: 100, offset })),
+    addressPages((offset) => ctx.qv.vaults.forGuardian(identity, { limit: 100, offset })),
   ]);
-  return [...new Set([...owned, ...guardian])];
+  const addresses = new Map([...owned.rows, ...guardian.rows].map((a) => [a.toLowerCase(), a]));
+  return { vaults: [...addresses.values()], truncated: owned.truncated || guardian.truncated };
+}
+
+export async function addressPages(read: (offset: number) => Promise<string[]>): Promise<{ rows: string[]; truncated: boolean }> {
+  const found = new Map<string, string>();
+  for (let offset = 0; offset < 1000; offset += 100) {
+    const page = await read(offset);
+    for (const address of page) found.set(address.toLowerCase(), address);
+    if (page.length < 100) return { rows: [...found.values()], truncated: false };
+  }
+  return { rows: [...found.values()], truncated: true };
 }
 
 async function rowsFor(
@@ -68,9 +82,7 @@ async function rowsFor(
   chainHead?: number,
 ): Promise<TuiRow[]> {
   const vault = ctx.qv.vault(address);
-  const affs = await Promise.all(
-    txs.map((tx) => vault.affordances(tx.hash, identity)),
-  );
+  const affs = await mapPooled(txs, 4, (tx) => vault.affordances(tx.hash, identity));
   return txs.map((tx, i) => ({
     vault: address,
     vaultLabel: labelFor(ctx, address),
@@ -116,11 +128,13 @@ interface PendingRecoveryRow {
  * vault's pending set just to repaint the scoped panes. Both callers dispatch
  * the same events, so a switch and a refresh leave the UI in the same shape.
  */
-async function loadVaultScoped(
+export async function loadVaultScoped(
   ctx: AppContext,
   dispatch: Dispatch,
   address: string,
   identity: string,
+  historyLimit = 50,
+  historyKind: HistoryKind = 'transactions',
 ): Promise<void> {
   const vault = ctx.qv.vault(address);
   const moduleAddress = ctx.qv.config.contracts.socialRecovery ?? null;
@@ -132,86 +146,96 @@ async function loadVaultScoped(
       ] as const).then(([enabled, config, pending]) => ({ enabled, config, pending }))
     : Promise.resolve({ enabled: false, config: null, pending: [] as PendingRecoveryRow[] });
 
-  const [info, modules, balances, historyPage, recoveryState, health] = await Promise.all([
-    vault.info(),
-    vault.modules(),
-    vault.balances({ verify: false }),
-    vault.transactionHistory({ limit: 50 }),
-    recoveryReads,
-    ctx.qv.indexerHealth(),
-  ]);
-
-  dispatch({
-    type: 'vault-detail',
-    detail: {
-      owners: info.owners,
-      threshold: info.threshold,
-      minExecutionDelay: info.minExecutionDelay,
-      modules,
-      balanceWei: balances.native,
-      tokens: balances.tokens,
-    },
-  });
-
-  const recoveryModule: RecoveryModuleDetail = {
-    address: moduleAddress,
-    enabled: recoveryState.enabled,
-    configured: recoveryState.config?.configured ?? false,
-    guardians: recoveryState.config?.guardians ?? [],
-    threshold: recoveryState.config?.threshold ?? 0,
-    recoveryPeriod: recoveryState.config?.recoveryPeriod ?? 0,
-  };
-  dispatch({ type: 'recovery-module', detail: recoveryModule });
-
-  const pendingRecovery = recoveryState.pending as PendingRecoveryRow[];
-  const first = pendingRecovery[0];
-  const recoveryAffordances = first
-    ? await vault.recovery.affordances(first.hash, identity)
-    : [];
-  const recovery: RecoveryDetail | null = first
-    ? {
-        hash: first.hash,
-        newOwners: first.newOwners,
-        newThreshold: first.newThreshold,
-        approvals: first.approvalCount,
-        required: first.requiredThreshold,
-        ...(first.executionTime ? { executableAt: first.executionTime } : {}),
-        ...(first.expiration ? { expiration: first.expiration } : {}),
-        affordances: recoveryAffordances,
-        additional: Math.max(0, pendingRecovery.length - 1),
+  // Independent panes can succeed even when another read fails.
+  const results = await Promise.allSettled([
+    (async () => {
+      const [info, modules, balances, delegatecallTargets, signedMessages] = await Promise.all([
+        vault.info(), vault.modules(), vault.balances({ verify: false }), vault.delegatecallTargets(), vault.signedMessages(),
+      ]);
+      dispatch({ type: 'vault-detail', address, detail: {
+        owners: info.owners, threshold: info.threshold, minExecutionDelay: info.minExecutionDelay,
+        modules, balanceWei: balances.native, tokens: balances.tokens, delegatecallTargets, signedMessages: signedMessages.map((r) => r.msg_hash),
+      } });
+    })(),
+    (async () => {
+      const recoveryState = await recoveryReads;
+      const recoveryModule: RecoveryModuleDetail = {
+        address: moduleAddress, enabled: recoveryState.enabled,
+        configured: recoveryState.config?.configured ?? false,
+        guardians: recoveryState.config?.guardians ?? [],
+        threshold: recoveryState.config?.threshold ?? 0,
+        recoveryPeriod: recoveryState.config?.recoveryPeriod ?? 0,
+      };
+      const details = await mapPooled(recoveryState.pending as PendingRecoveryRow[], 4, async (r): Promise<RecoveryDetail> => ({
+        hash: r.hash, newOwners: r.newOwners, newThreshold: r.newThreshold,
+        approvals: r.approvalCount, required: r.requiredThreshold,
+        ...(r.executionTime ? { executableAt: r.executionTime } : {}),
+        ...(r.expiration ? { expiration: r.expiration } : {}),
+        affordances: await vault.recovery.affordances(r.hash, identity),
+      }));
+      dispatch({ type: 'recovery-module', address, detail: recoveryModule });
+      dispatch({ type: 'recoveries', address, details });
+    })(),
+    (async () => {
+      if (historyKind !== 'transactions') {
+        const read = async (limit: number, offset: number): Promise<{ data: HistoryRecord[]; hasMore: boolean }> => {
+          if (historyKind === 'deposits') {
+            const page = await vault.deposits({ limit, offset });
+            return { hasMore: page.hasMore, data: page.data.map((r) => ({ title: `Deposit · block ${r.deposited_at_block}`, lines: [`From: ${r.sender_address}`, `Amount: ${r.amount} wei`, `Transaction: ${r.deposited_at_tx}`] })) };
+          }
+          if (historyKind === 'transfers') {
+            const page = await vault.tokenTransfers({ limit, offset });
+            return { hasMore: page.hasMore, data: page.data.map((r) => ({ title: `${r.direction} · block ${r.block_number}`, lines: [`Token: ${r.token_address}`, `From: ${r.from_address}`, `To: ${r.to_address}`, `Amount: ${r.value} base units${r.token_id ? ` · token ID: ${r.token_id}` : ''}`, `Transaction: ${r.transaction_hash}`] })) };
+          }
+          const page = await vault.recovery.history({ limit, offset });
+          return { hasMore: page.length === limit, data: page.map((r) => ({ title: `Recovery · ${r.status}`, lines: [`Request: ${r.hash}`, `Threshold: ${r.newThreshold}`, ...r.newOwners.map((owner) => `Owner: ${owner}`)] })) };
+        };
+        const records: HistoryRecord[] = [];
+        let hasMore = false;
+        while (records.length < historyLimit) {
+          const page = await read(Math.min(100, historyLimit - records.length), records.length);
+          records.push(...page.data);
+          hasMore = page.hasMore;
+          if (!hasMore || !page.data.length) break;
+        }
+        dispatch({ type: 'history-records', address, kind: historyKind, page: { records, hasMore } });
+        return;
       }
-    : null;
-  dispatch({ type: 'recovery', detail: recovery });
+      const [page, health] = await Promise.all([
+        historyPages((limit, offset) => vault.transactionHistory({ limit, offset }), historyLimit), ctx.qv.indexerHealth().catch(() => null),
+      ]);
+      dispatch({ type: 'history', address, hasMore: page.hasMore,
+        rows: await rowsFor(ctx, address, identity, page.data, health?.chainHead) });
+    })(),
+  ]);
+  const names = ['Vault/assets', 'Recovery', 'History'];
+  const failures = results.flatMap((r, i) => r.status === 'rejected' ? [names[i]!] : []);
+  dispatch({ type: 'scoped-error', address, message: failures.length
+    ? `${failures.join(', ')} refresh failed; displayed data may be stale. Press r to retry.` : undefined });
 
-  dispatch({
-    type: 'history',
-    rows: await rowsFor(ctx, address, identity, historyPage.data, health.chainHead),
-  });
 }
 
 /**
  * One refresh. The cross-vault inbox lands first so the default pane paints,
  * then the slower per-vault reads for the other panes.
  *
- * `preferred` is the vault the cursor is currently on. It is honoured when it
- * still exists, so a refresh — which fires on every chain event — never yanks
- * the vault-scoped panes back to whichever vault the indexer happened to
- * return first. Returns the address actually shown, for the caller to keep.
+ * Scoped reads are coordinated separately. Discovery cannot overwrite a
+ * selection the user changed while the global request was in flight.
  */
 async function refresh(
   ctx: AppContext,
   dispatch: Dispatch,
   vaultsOut: (vaults: string[]) => void,
-  preferred?: string,
-): Promise<string | undefined> {
+): Promise<void> {
   const identity = ctx.identity();
   if (!identity) throw new UsageError('No identity set.', 'qv use --as 0x…');
   dispatch({ type: 'loading' });
 
-  const [vaults, health] = await Promise.all([
+  const [discovery, health] = await Promise.all([
     loadVaults(ctx, identity),
     ctx.qv.indexerHealth().catch(() => null),
   ]);
+  const { vaults } = discovery;
   vaultsOut(vaults);
   const degraded = health?.available !== true;
 
@@ -225,39 +249,56 @@ async function refresh(
   // reshuffles between refreshes — and on a surface that auto-refreshes on
   // chain events, the row under the cursor can change identity between
   // looking at it and pressing `a`. Observed against 25 live Orchard vaults.
-  const perVault = await mapPooled(vaults, 6, async (address, i) => {
-      const vault = ctx.qv.vault(address);
+  const warnings: string[] = discovery.truncated ? ['Vault discovery capped at 1,000 per role; additional vaults may be missing'] : [];
+  const perVault = await mapPooled(vaults, 4, async (address, i) => {
+    const vault = ctx.qv.vault(address);
+    try {
       const [pending, hasRecovery] = await Promise.all([
-        vault.pendingTransactions({ limit: 50 }),
+        pendingPages((offset) => vault.pendingTransactions({ limit: 100, offset })),
         vault.recovery.hasPending(),
       ]);
-      return {
-        i,
-        summary: {
-          address,
-          label: labelFor(ctx, address),
-          pending: pending.length,
-          hasRecovery,
-        } satisfies VaultSummary,
-        rows: await rowsFor(ctx, address, identity, pending, health?.chainHead),
-      };
-    });
+      if (pending.truncated) warnings.push(`${labelFor(ctx, address)}: showing first 1,000 pending transactions`);
+      return { i, summary: { address, label: labelFor(ctx, address), pending: pending.rows.length, hasRecovery } satisfies VaultSummary,
+        rows: await rowsFor(ctx, address, identity, pending.rows, health?.chainHead) };
+    } catch {
+      warnings.push(`${labelFor(ctx, address)}: unable to load transactions or recovery status`);
+      return { i, summary: { address, label: labelFor(ctx, address), pending: 0, hasRecovery: false } satisfies VaultSummary, rows: [] as TuiRow[] };
+    }
+  });
   perVault.sort((a, b) => a.i - b.i);
-
   dispatch({ type: 'vaults', vaults: perVault.map((v) => v.summary) });
-  dispatch({ type: 'data', rows: sortInbox(perVault.flatMap((v) => v.rows)), degraded, at: ctx.now() });
+  dispatch({ type: 'data', rows: sortInbox(perVault.flatMap((v) => v.rows)),
+    degraded: degraded || warnings.length > 0, at: ctx.now(),
+    warning: warnings.length ? warnings.join('; ') : undefined });
 
-  // Honour the cursor, not the indexer's ordering.
-  const address = vaults.find((v) => v.toLowerCase() === preferred?.toLowerCase()) ?? vaults[0];
-  if (!address) {
-    dispatch({ type: 'vault-detail', detail: null });
-    dispatch({ type: 'recovery', detail: null });
-    dispatch({ type: 'history', rows: [] });
-    return undefined;
+}
+
+/** Walk pending pages with an explicit resource bound, never a silent first page. */
+export async function pendingPages(read: (offset: number) => Promise<VaultTransaction[]>): Promise<{ rows: VaultTransaction[]; truncated: boolean }> {
+  const rows = new Map<string, VaultTransaction>();
+  for (let offset = 0; offset < 1000; offset += 100) {
+    const page = await read(offset);
+    for (const tx of page) rows.set(tx.hash, tx);
+    if (page.length < 100) return { rows: [...rows.values()], truncated: false };
   }
+  return { rows: [...rows.values()], truncated: true };
+}
 
-  await loadVaultScoped(ctx, dispatch, address, identity);
-  return address;
+export async function historyPages(
+  read: (limit: number, offset: number) => Promise<{ data: VaultTransaction[]; hasMore: boolean }>,
+  target: number,
+): Promise<{ data: VaultTransaction[]; hasMore: boolean }> {
+  const rows = new Map<string, VaultTransaction>();
+  let offset = 0;
+  let hasMore = false;
+  while (offset < target) {
+    const page = await read(Math.min(100, target - offset), offset);
+    for (const tx of page.data) rows.set(tx.hash, tx);
+    offset += page.data.length;
+    hasMore = page.hasMore;
+    if (!page.hasMore || !page.data.length) break;
+  }
+  return { data: [...rows.values()], hasMore };
 }
 
 /** Subscribe within the channel budget; events become staleness and activity. */
@@ -289,7 +330,7 @@ function subscribe(
             });
             onChange();
           },
-          { topics: ['transactions', 'confirmations', 'owners', 'modules', 'recoveries'] },
+          { topics: ['transactions', 'confirmations', 'owners', 'modules', 'recoveries', 'deposits', 'tokenTransfers', 'signedMessages'] },
         ),
       );
     } catch {
@@ -324,6 +365,14 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
     if (ctx.flags.json) {
       throw new UsageError('qv tui has no --json form.', 'Use `qv inbox --json`.');
     }
+    if (ctx.flags.noInput) {
+      throw new UsageError('qv tui requires interactive input.', 'Use one-shot commands with --no-input.');
+    }
+    // Ink initializes its color support during import, independently of our
+    // one-shot renderer. Apply the explicit preference before loading it.
+    if (ctx.flags.color !== 'auto') {
+      process.env.FORCE_COLOR = ctx.flags.color === 'never' ? '0' : '1';
+    }
 
     // Ink and React load here and nowhere else. See the note at the top.
     const [ink, appModule, react] = await Promise.all([
@@ -334,6 +383,7 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
 
     const env: TuiEnv = {
       identity: ctx.identity() ?? '',
+      profile: ctx.profileName,
       contactName: (address) => ctx.contactName(address),
       now: () => ctx.now(),
       width: process.stdout.columns ?? 100,
@@ -347,8 +397,23 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
     let watchedKey = '';
     let refreshing = false;
     let refreshAgain = false;
+    let closed = false;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let historyLimit = 50;
+    let historyKind: HistoryKind = 'transactions';
+    let scoped: ReturnType<typeof latestRequest<TuiEvent>> | undefined;
+    const onSelectVault = async (dispatch: Dispatch, address: string, more = false): Promise<void> => {
+      if (closed) return;
+      if (currentVault !== address) historyLimit = 50;
+      if (more) historyLimit += 50;
+      currentVault = address;
+      scoped ??= latestRequest(dispatch);
+      await scoped.run((emit) => loadVaultScoped(ctx, emit, address, ctx.identity() ?? '', historyLimit, historyKind),
+        () => ({ type: 'scoped-error', address, message: 'Vault refresh failed. Press r to retry.' }));
+    };
 
     const doRefresh = async (dispatch: Dispatch): Promise<void> => {
+      if (closed) return;
       if (refreshing) {
         refreshAgain = true;
         return;
@@ -357,35 +422,27 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
       try {
         do {
           refreshAgain = false;
-          currentVault = await refresh(
-            ctx,
-            dispatch,
-            (found) => {
-              vaults = found;
-            },
-            currentVault,
-          );
+          await refresh(ctx, dispatch, (found) => { vaults = found; });
+          if (closed) break;
+          // The selection callback owns currentVault; an old global refresh never overwrites it.
+          if (currentVault && vaults.some((v) => v.toLowerCase() === currentVault!.toLowerCase())) {
+            await onSelectVault(dispatch, currentVault);
+          }
           const nextKey = vaults.map((vault) => vault.toLowerCase()).join(',');
           if (nextKey !== watchedKey) {
             await watching?.close();
-            watching = subscribe(ctx, vaults, dispatch, () => redraw?.());
+            if (closed) break;
+            watching = subscribe(ctx, vaults, dispatch, () => {
+              if (refreshTimer || closed) return;
+              refreshTimer = setTimeout(() => { refreshTimer = undefined; redraw?.(); }, 500);
+            });
             watchedKey = nextKey;
           }
-        } while (refreshAgain);
+        } while (refreshAgain && !closed);
       } catch (err) {
         dispatch({ type: 'error', message: err instanceof Error ? err.message : 'load failed' });
       } finally {
         refreshing = false;
-      }
-    };
-
-    /** Vault cursor moved: repaint the three scoped panes, nothing else. */
-    const onSelectVault = async (dispatch: Dispatch, address: string): Promise<void> => {
-      currentVault = address;
-      try {
-        await loadVaultScoped(ctx, dispatch, address, ctx.identity() ?? '');
-      } catch (err) {
-        dispatch({ type: 'error', message: err instanceof Error ? err.message : 'load failed' });
       }
     };
 
@@ -399,12 +456,15 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
      * and reverses all of it afterwards.
      */
     const onSpawn = async (argv: string[]): Promise<{ ok: boolean; message: string }> => {
-      const outcome = await spawnSigner(argv);
+      const outcome = await spawnSigner(signerArgv(argv, {
+        profile: ctx.profileName, identity: ctx.identity() ?? '',
+        color: ctx.flags.color, dryRun: ctx.flags.dryRun,
+      }));
       // 130 is Ctrl-C: the user is already leaving and does not need a prompt
       // explaining why. Everything else gets read before the screen flips back.
-      if (!outcome.ok && outcome.exitCode !== 130) {
+      if (outcome.exitCode !== 130) {
         await holdUntilAcknowledged(
-          `\n  ${outcome.message} — the reason is printed above.\n  Press any key to return. `,
+          `\n  ${outcome.message} — review the result above.\n  Press any key to return. `,
         );
       }
       return { ok: outcome.ok, message: outcome.message };
@@ -418,12 +478,18 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
           return doRefresh(dispatch);
         },
         onSelectVault,
+        onHistoryKind: (dispatch: Dispatch, address: string, kind: HistoryKind) => {
+          historyKind = kind;
+          historyLimit = 50;
+          return onSelectVault(dispatch, address);
+        },
+        onMoreHistory: (dispatch: Dispatch, address: string) => onSelectVault(dispatch, address, true),
         onSpawn,
       }),
       // btop/htop-style, and Ink's own option rather than hand-written escape
       // sequences: it knows to leave the alternate screen around a suspension
       // and to restore the primary screen on unmount, including on a signal.
-      { exitOnCtrlC: true, alternateScreen: true },
+      { exitOnCtrlC: true, alternateScreen: true, kittyKeyboard: { mode: 'auto' }, maxFps: 30 },
     );
     // Heal missed socket events and tail vaults beyond the realtime-channel budget.
     const pollTimer = setInterval(() => redraw?.(), 15_000);
@@ -431,6 +497,9 @@ export const tuiCommand: CommandSpec<Record<string, never>, { exited: true }> = 
     try {
       await app.waitUntilExit();
     } finally {
+      closed = true;
+      scoped?.close();
+      clearTimeout(refreshTimer);
       clearInterval(pollTimer);
       // Awaited, not fired and forgotten: each one closes a Realtime channel.
       await watching?.close();

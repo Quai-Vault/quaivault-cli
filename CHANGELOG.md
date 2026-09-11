@@ -6,6 +6,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is `0.x`, minor bumps may contain breaking changes.
 
+## [0.7.0] — 2026-09-11
+
+### Added
+
+- Responsive TUI down to 40×12, scrollable details, keyboard help, direct pane
+  shortcuts, paging keys, and inbox/transaction-history search.
+- Cursor editing, Unicode-aware table widths, long calldata/address-list/file-path
+  inputs, explicit token decimals, ABI-assisted calls, and common proposal options.
+- Indexed deposit, token-transfer, and recovery-history categories with load-more;
+  selection across every pending recovery request; receive address, delegatecall
+  targets, and signed messages in vault detail.
+- Kitty keyboard protocol auto-detection with standard input fallback. A synthetic
+  PTY regression suite now checks input, resize, child handoff, and terminal cleanup.
+
+### Fixed
+
+- Delegated commands preserve the reviewed profile, identity, color and dry-run
+  setting. Pausing native stdin reads after Ink's callback prevents stolen child input.
+- Results remain readable on the primary screen until a real single-key acknowledgement.
+- Superseded requests cannot overwrite another vault, and disappearing transactions
+  or recovery requests cannot silently change the action target under review.
+- Only Enter on the final form field submits. Text editing and help/search overlays
+  cannot trigger underlying action or refresh shortcuts.
+- Discovery and pending reads page beyond 50 entries, with explicit resource bounds;
+  history pages past the SDK's per-request cap. Independent panes survive partial
+  failures. Bounded fan-out and debounced realtime refresh reduce request bursts.
+- Recovery without a reached guardian threshold no longer displays “executable now.”
+
 ## [0.6.1] — 2026-09-11
 
 ### Security

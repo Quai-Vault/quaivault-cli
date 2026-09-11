@@ -30,6 +30,14 @@ export interface SpawnOutcome {
   message: string;
 }
 
+/** Preserve the reviewed context without inheriting unattended approval flags. */
+export function signerArgv(argv: string[], context: {
+  profile: string; identity: string; color: string; dryRun: boolean;
+}): string[] {
+  return ['--profile', context.profile, '--as', context.identity, '--color', context.color,
+    ...(context.dryRun ? ['--dry-run'] : []), ...argv];
+}
+
 /** The one-shot exit codes, read back into something worth showing. */
 function describe(code: number): { ok: boolean; message: string } {
   switch (code) {
@@ -61,8 +69,8 @@ function describe(code: number): { ok: boolean; message: string } {
  * "refused: precondition or policy" covers everything from a wrong password
  * to a policy allowlist to a key that does not match the identity.
  *
- * Called only on failure. A success has already told the user what happened,
- * through the confirmation they just answered.
+ * Hold successful results too, so transaction hashes can be read and copied
+ * before returning to the alternate screen.
  *
  * Restores stdin exactly as `pauseInput` left it — paused and unref'd — so
  * Ink's `resumeInput` finds the state it expects.
@@ -71,20 +79,33 @@ export async function holdUntilAcknowledged(message: string): Promise<void> {
   const stdin = process.stdin;
   if (!stdin.isTTY || !process.stdout.isTTY) return;
   process.stdout.write(message);
+  const wasRaw = stdin.isRaw;
   await new Promise<void>((resolve) => {
     const finish = (): void => {
       stdin.off('data', finish);
+      stdin.off('end', finish);
+      stdin.off('error', finish);
+      stdin.setRawMode(wasRaw);
       stdin.pause();
       stdin.unref();
       resolve();
     };
+    stdin.setRawMode(true);
     stdin.ref();
     stdin.resume();
     stdin.once('data', finish);
+    stdin.once('end', finish);
+    stdin.once('error', finish);
   });
 }
 
 export async function spawnSigner(argv: string[]): Promise<SpawnOutcome> {
+  // Ink detaches its listener during suspension, but Node may still have a
+  // native TTY read pending. Let the current readable callback finish before
+  // pausing stdin, otherwise its final read() can restart that read and steal
+  // the child's first password/confirmation bytes.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  process.stdin.pause();
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [process.argv[1] as string, ...argv], {
       // The child owns the terminal outright while it runs.
@@ -96,8 +117,8 @@ export async function spawnSigner(argv: string[]): Promise<SpawnOutcome> {
         QUAIVAULT_PRIVATE_KEY: undefined,
       },
     });
-    child.on('close', (code) => {
-      const exitCode = code ?? 1;
+    child.on('close', (code, signal) => {
+      const exitCode = code ?? (signal === 'SIGINT' ? 130 : 1);
       resolve({ exitCode, ...describe(exitCode) });
     });
     child.on('error', (err) => {
