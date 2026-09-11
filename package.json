@@ -58,7 +58,7 @@
     "commander": "15.0.0",
     "ink": "7.1.1",
     "picocolors": "1.1.1",
-    "quais": "1.0.0-alpha.56",
+    "quais": "1.0.0-alpha.57",
     "react": "19.2.8",
     "smol-toml": "1.7.1",
     "string-width": "8.2.2"
