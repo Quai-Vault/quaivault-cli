@@ -61,7 +61,7 @@
     "quais": "1.0.0-alpha.56",
     "react": "19.2.8",
     "smol-toml": "1.7.1",
-    "string-width": "8.2.2"
+    "string-width": "8.3.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
